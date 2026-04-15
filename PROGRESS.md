@@ -14,6 +14,21 @@ We have the numbers: **IABF F1 = 32.4 % vs naive LLM 27.8 %, with 100 % precisio
 
 ## 📋 BACKLOG (post-submission polish)
 
+### Run11 analysis — 10 critical issues (to implement)
+
+- [ ] **R11-1** — Auto-chain `icat + strings` when evidence_for contains filename+inode. Run11 found `irunin.ini`/`mirc.ini`/`.dbx` but never extracted contents → missed Q14/Q15/Q21 (IP, MAC, nick, channels).
+- [ ] **R11-2** — RECmd per-key targeted parse emitting canonical `KeyName: Value` strings (RegisteredOwner, ProductName, InstallDate, ComputerName, TimeZone, ShutdownTime) — current pre-pass emits generic "raw: ..." blobs that don't match GT tokens.
+- [ ] **R11-3** — Convert epoch/FILETIME timestamps to human-readable (`2004-08-19 17:48:27`) for InstallDate/ShutdownTime findings. GT expects dates, not integers.
+- [ ] **R11-4** — Add `md5sum` to probe. Q1 expects MD5 `AEE4FCD9301C03B3B054623CA261959A`; we only emit SHA-256.
+- [ ] **R11-5** — Filter meta-findings from confirmed_findings before scoring (patterns: `located at inode`, `extracted to /tmp`, `MFT index shows`). All 4 FPs in run11 are tooling metadata, not DFIR answers.
+- [ ] **R11-6** — When `.dbx` file identified, auto-run `strings | grep -E '@|smtp\.|news\.|nntp\.|alt\.2600'` to recover SMTP/NNTP (Q17/Q18).
+- [ ] **R11-7** — Playbook: explicit capture-file search (`.cap`, `.pcap`, files with no extension under Ethereal/ dir) → strings → device-type + filename recovery (Q23 "Interception", Q24 "Windows CE").
+- [ ] **R11-8** — Webmail/IE cache parser: extract `index.dat` via `pasco` or `strings`; grep saved `.htm` (Showletter*, mrevilrulez*, yahoo*) for Q26/Q27.
+- [ ] **R11-9** — Final Q-answering pass: after investigation completes, re-ask each GT-style question against confirmed_findings and emit canonical short answers (Yes/No, counts) that the scorer can match for Q29/Q31.
+- [ ] **R11-10** — Tool-output cache keyed by `(command, exit_code)` + Phase 3 `max_tokens=512`. Run11 burned 248k tokens vs run7's 220k for similar iter count because identical greps get re-sent to LLM each time.
+
+### Prior backlog
+
 - [ ] **B2** — 2nd dataset cross-validation (Digital Corpora or Volatility memory sample)
 - [ ] **B4** — Verify ARCHITECTURE.md / DEPLOYMENT.md are current (light audit done; deeper pass deferred)
 - [ ] **B11** — Streaming LLM responses (perf #3 from 10-issue analysis)
