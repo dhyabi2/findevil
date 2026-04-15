@@ -1,0 +1,16 @@
+# FIND EVIL! - IABF Agent Dependencies
+
+# LLM client
+httpx>=0.27.0
+
+# MCP server
+mcp>=1.0.0
+
+# Configuration
+pyyaml>=6.0
+
+# Data processing
+pandas>=2.0.0
+
+# Async support
+anyio>=4.0.0

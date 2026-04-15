@@ -1,0 +1,187 @@
+# ============================================================
+# FIND EVIL! - IABF Agent Configuration
+# ============================================================
+# LLM Provider & Model Settings
+# ============================================================
+
+llm:
+  # Provider: openrouter, openai, anthropic, ollama, local
+  provider: openrouter
+
+  # OpenRouter settings
+  openrouter:
+    api_key: "${OPENROUTER_API_KEY}"        # Set via environment variable
+    base_url: "https://openrouter.ai/api/v1"
+    default_model: "google/gemma-4-31b-it"
+    fallback_model: "google/gemma-3-27b-it"
+    max_tokens: 8192
+    temperature: 0.2                         # Low temp for analytical precision
+    top_p: 0.9
+    # Optional: route preferences
+    route: "fallback"                        # fallback | priority
+    # Optional: site info for OpenRouter rankings
+    site_url: "https://github.com/dhyabi2/findevil"
+    site_name: "FIND EVIL IABF Agent"
+
+  # Alternative providers (uncomment to use)
+  # openai:
+  #   api_key: "${OPENAI_API_KEY}"
+  #   base_url: "https://api.openai.com/v1"
+  #   default_model: "gpt-4o"
+  #   max_tokens: 8192
+  #   temperature: 0.2
+
+  # anthropic:
+  #   api_key: "${ANTHROPIC_API_KEY}"
+  #   default_model: "claude-sonnet-4-20250514"
+  #   max_tokens: 8192
+  #   temperature: 0.2
+
+  # ollama:
+  #   base_url: "http://localhost:11434"
+  #   default_model: "llama3:70b"
+  #   max_tokens: 4096
+  #   temperature: 0.2
+
+# ============================================================
+# IABF Agent Settings
+# ============================================================
+
+agent:
+  # Maximum hypothesis iterations before requiring human review
+  max_iterations: 15
+  # Confidence threshold to consider a hypothesis confirmed (0.0-1.0)
+  confidence_threshold: 0.75
+  # Confidence threshold to discard a hypothesis
+  discard_threshold: 0.15
+  # Enable self-correction feedback loop
+  self_correction: true
+  # Maximum concurrent tool executions
+  max_concurrent_tools: 3
+  # Timeout for individual tool execution (seconds)
+  tool_timeout: 300
+  # Enable MITRE ATT&CK mapping
+  mitre_mapping: true
+
+# ============================================================
+# Guardrails & Security Boundaries
+# ============================================================
+
+guardrails:
+  # ARCHITECTURAL enforcement (not prompt-based)
+  # These cannot be overridden by the LLM
+  blocked_commands:
+    - "rm -rf"
+    - "mkfs"
+    - "dd of="
+    - "fdisk"
+    - "parted"
+    - "shred"
+    - "wipefs"
+    - "> /dev/"
+    - "chmod 777"
+    - "mount -o rw"          # Evidence must be read-only
+
+  # Allowed base directories for investigation
+  allowed_paths:
+    - "/cases"
+    - "/mnt"
+    - "/tmp/findevil"
+    - "/home/sansforensics/findevil/logs"
+
+  # Read-only enforcement for evidence
+  evidence_read_only: true
+
+  # Maximum output size per tool call (bytes)
+  max_output_size: 10485760  # 10MB
+
+  # Require confirmation for these tool categories
+  require_confirmation:
+    - "disk_write"
+    - "network_send"
+    - "process_kill"
+
+# ============================================================
+# Audit Trail Configuration
+# ============================================================
+
+audit:
+  # Enable structured logging
+  enabled: true
+  # Log directory
+  log_dir: "./logs"
+  # Log format: json | text
+  format: "json"
+  # Log level: debug | info | warning | error
+  level: "info"
+  # Track token usage
+  track_tokens: true
+  # Track tool execution times
+  track_timing: true
+  # Track iteration traces (hypothesis -> result -> refinement)
+  track_iterations: true
+  # Export format for submission
+  export_format: "jsonl"
+
+# ============================================================
+# SIFT Tool Paths
+# ============================================================
+
+tools:
+  sleuthkit:
+    mmls: "/usr/bin/mmls"
+    fsstat: "/usr/bin/fsstat"
+    fls: "/usr/bin/fls"
+    icat: "/usr/bin/icat"
+    ifind: "/usr/bin/ifind"
+    img_stat: "/usr/bin/img_stat"
+    blkls: "/usr/bin/blkls"
+    blkcat: "/usr/bin/blkcat"
+    sigfind: "/usr/bin/sigfind"
+    tsk_recover: "/usr/bin/tsk_recover"
+    srch_strings: "/usr/bin/srch_strings"
+
+  plaso:
+    log2timeline: "/usr/bin/log2timeline.py"
+    psort: "/usr/bin/psort.py"
+    pinfo: "/usr/bin/pinfo.py"
+
+  zimmerman:
+    base_path: "/opt/zimmermantools"
+    mftecmd: "/opt/zimmermantools/MFTECmd.exe"
+    evtxecmd: "/opt/zimmermantools/EvtxeCmd/EvtxECmd.exe"
+    recmd: "/opt/zimmermantools/RECmd/RECmd.exe"
+    amcache_parser: "/opt/zimmermantools/AmcacheParser.exe"
+    appcompat_parser: "/opt/zimmermantools/AppCompatCacheParser.exe"
+    jlecmd: "/opt/zimmermantools/JLECmd.exe"
+    lecmd: "/opt/zimmermantools/LECmd.exe"
+    sbecmd: "/opt/zimmermantools/SBECmd.exe"
+    rbcmd: "/opt/zimmermantools/RBCmd.exe"
+    wxtcmd: "/opt/zimmermantools/WxTCmd.exe"
+    sqlecmd: "/opt/zimmermantools/SQLECmd/SQLECmd.exe"
+    # Zimmerman .NET tools run via: dotnet <tool>.dll or mono <tool>.exe
+    runtime: "dotnet"
+
+  yara:
+    binary: "/usr/bin/yara"
+    rules_dir: "/usr/share/yara-rules"
+
+  bulk_extractor:
+    binary: "/usr/bin/bulk_extractor"
+
+  carving:
+    foremost: "/usr/bin/foremost"
+    scalpel: "/usr/bin/scalpel"
+
+  network:
+    tshark: "/usr/bin/tshark"
+    tcpdump: "/usr/bin/tcpdump"
+
+  volatility:
+    binary: "vol3"
+    # vol3 python module
+    python_module: "volatility3"
+
+  strings:
+    binary: "/usr/bin/strings"
+    srch_strings: "/usr/bin/srch_strings"

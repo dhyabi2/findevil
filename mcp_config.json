@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "findevil-sift": {
+      "command": "python3",
+      "args": ["/home/sansforensics/findevil/mcp_server/server.py"],
+      "env": {
+        "OPENROUTER_API_KEY": "your-key-here"
+      }
+    }
+  }
+}

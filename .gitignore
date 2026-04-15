@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.venv/
+env/
+
+# Logs (keep directory, ignore contents)
+logs/*.jsonl
+logs/*.json
+!logs/.gitkeep
+
+# Temp forensic output
+/tmp/findevil/
+
+# Large evidence datasets (not committed — fetched separately)
+datasets/hacking_case/*.E0*
+datasets/**/*.raw
+datasets/**/*.dd
+datasets/**/*.img
+datasets/**/*.mem
+datasets/**/*.pcap
+
+# Console logs
+logs/*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
