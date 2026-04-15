@@ -1,0 +1,1 @@
+{"timestamp": "2026-04-15T08:32:30.753346+00:00", "session_id": "c9705a0d", "event_type": "llm_call", "model": "json_call", "tokens": {}, "latency_ms": 0, "purpose": "phase2_hypotheses"}

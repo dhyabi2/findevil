@@ -1,0 +1,3 @@
+{"timestamp": "2026-04-15T08:32:30.812532+00:00", "session_id": "9c1665e8", "event_type": "guardrail_violation", "detail": "Binary 'echo' is not in the allowed forensic tools list", "command": "echo probe"}
+{"timestamp": "2026-04-15T08:32:30.812871+00:00", "session_id": "9c1665e8", "event_type": "llm_call", "model": "json_call", "tokens": {}, "latency_ms": 0, "purpose": "phase3_analysis"}
+{"timestamp": "2026-04-15T08:32:30.813014+00:00", "session_id": "9c1665e8", "event_type": "hypothesis", "id": "H0_0", "iteration": 0, "hypothesis": "Test hyp", "mitre_technique": "", "confidence_before": 0.95, "confidence_after": 0.95, "status": "confirmed", "evidence_for": ["artifact X"], "evidence_against": [], "tool_executions": [], "refinement_note": ""}

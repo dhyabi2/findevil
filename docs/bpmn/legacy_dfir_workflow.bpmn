@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Defs_legacy"
+                  targetNamespace="http://findevil.io/bpmn">
+  <bpmn:process id="Process_LEGACY_DFIR" name="Legacy analyst-driven DFIR workflow" isExecutable="false">
+
+    <bpmn:laneSet id="Lanes_legacy">
+      <bpmn:lane id="Lane_Analyst" name="Human analyst (manual)">
+        <bpmn:flowNodeRef>Start_Case</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Acquire</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_CoC</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_TriageBrief</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_RunMmls</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_RunFls</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Recover</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_RegistryParse</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_EvtxParse</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Timeline</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Strings</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_Correlate</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Gw_FoundIt</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_RethinkAndRetry</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Task_WriteReport</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>End_Reported</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+
+    <bpmn:startEvent id="Start_Case" name="Receive case (disk + paperwork)">
+      <bpmn:outgoing>flow_start_acq</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:task id="Task_Acquire" name="Manual image acquisition (dd / FTK Imager / EnCase)">
+      <bpmn:incoming>flow_start_acq</bpmn:incoming>
+      <bpmn:outgoing>flow_acq_coc</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_CoC" name="Document chain of custody, hash image, sign forms">
+      <bpmn:incoming>flow_acq_coc</bpmn:incoming>
+      <bpmn:outgoing>flow_coc_brief</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_TriageBrief" name="Read alert / case brief, decide investigation strategy (whiteboard)">
+      <bpmn:incoming>flow_coc_brief</bpmn:incoming>
+      <bpmn:outgoing>flow_brief_mmls</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_RunMmls" name="Run mmls / fsstat — read partition layout, note offsets in lab notebook">
+      <bpmn:incoming>flow_brief_mmls</bpmn:incoming>
+      <bpmn:outgoing>flow_mmls_fls</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_RunFls" name="Run fls -r — eyeball directory tree, manually grep for suspicious paths">
+      <bpmn:incoming>flow_mmls_fls</bpmn:incoming>
+      <bpmn:outgoing>flow_fls_recover</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Recover" name="icat / tsk_recover for files of interest (one inode at a time)">
+      <bpmn:incoming>flow_fls_recover</bpmn:incoming>
+      <bpmn:outgoing>flow_recover_reg</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_RegistryParse" name="Manually extract SOFTWARE / SYSTEM / SAM hives, parse with RegRipper / RECmd">
+      <bpmn:incoming>flow_recover_reg</bpmn:incoming>
+      <bpmn:outgoing>flow_reg_evtx</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_EvtxParse" name="Manually extract Windows Event Logs, parse with EvtxECmd / Event Log Explorer">
+      <bpmn:incoming>flow_reg_evtx</bpmn:incoming>
+      <bpmn:outgoing>flow_evtx_timeline</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Timeline" name="Build supertimeline (log2timeline.py + psort.py) — wait minutes-to-hours; eyeball CSV">
+      <bpmn:incoming>flow_evtx_timeline</bpmn:incoming>
+      <bpmn:outgoing>flow_timeline_strings</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Strings" name="strings / bulk_extractor / YARA — manual keyword fishing">
+      <bpmn:incoming>flow_timeline_strings</bpmn:incoming>
+      <bpmn:outgoing>flow_strings_corr</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Correlate" name="Mental correlation of artefacts → hypothesis (no formal record)">
+      <bpmn:incoming>flow_strings_corr</bpmn:incoming>
+      <bpmn:incoming>flow_retry_corr</bpmn:incoming>
+      <bpmn:outgoing>flow_corr_decide</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:exclusiveGateway id="Gw_FoundIt" name="Story explains all alerts? (analyst gut feel)">
+      <bpmn:incoming>flow_corr_decide</bpmn:incoming>
+      <bpmn:outgoing>flow_no_retry</bpmn:outgoing>
+      <bpmn:outgoing>flow_yes_report</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:task id="Task_RethinkAndRetry" name="Rethink: pick a different tool, re-grep, re-extract a different artefact (no audit trail of pivot)">
+      <bpmn:incoming>flow_no_retry</bpmn:incoming>
+      <bpmn:outgoing>flow_retry_corr</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_WriteReport" name="Hand-write report — narrative + screenshots + IOC table (hours)">
+      <bpmn:incoming>flow_yes_report</bpmn:incoming>
+      <bpmn:outgoing>flow_report_end</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:endEvent id="End_Reported" name="Case file delivered">
+      <bpmn:incoming>flow_report_end</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="flow_start_acq" sourceRef="Start_Case" targetRef="Task_Acquire"/>
+    <bpmn:sequenceFlow id="flow_acq_coc" sourceRef="Task_Acquire" targetRef="Task_CoC"/>
+    <bpmn:sequenceFlow id="flow_coc_brief" sourceRef="Task_CoC" targetRef="Task_TriageBrief"/>
+    <bpmn:sequenceFlow id="flow_brief_mmls" sourceRef="Task_TriageBrief" targetRef="Task_RunMmls"/>
+    <bpmn:sequenceFlow id="flow_mmls_fls" sourceRef="Task_RunMmls" targetRef="Task_RunFls"/>
+    <bpmn:sequenceFlow id="flow_fls_recover" sourceRef="Task_RunFls" targetRef="Task_Recover"/>
+    <bpmn:sequenceFlow id="flow_recover_reg" sourceRef="Task_Recover" targetRef="Task_RegistryParse"/>
+    <bpmn:sequenceFlow id="flow_reg_evtx" sourceRef="Task_RegistryParse" targetRef="Task_EvtxParse"/>
+    <bpmn:sequenceFlow id="flow_evtx_timeline" sourceRef="Task_EvtxParse" targetRef="Task_Timeline"/>
+    <bpmn:sequenceFlow id="flow_timeline_strings" sourceRef="Task_Timeline" targetRef="Task_Strings"/>
+    <bpmn:sequenceFlow id="flow_strings_corr" sourceRef="Task_Strings" targetRef="Task_Correlate"/>
+    <bpmn:sequenceFlow id="flow_corr_decide" sourceRef="Task_Correlate" targetRef="Gw_FoundIt"/>
+    <bpmn:sequenceFlow id="flow_no_retry" name="No — try something else" sourceRef="Gw_FoundIt" targetRef="Task_RethinkAndRetry"/>
+    <bpmn:sequenceFlow id="flow_retry_corr" sourceRef="Task_RethinkAndRetry" targetRef="Task_Correlate"/>
+    <bpmn:sequenceFlow id="flow_yes_report" name="Yes — write up" sourceRef="Gw_FoundIt" targetRef="Task_WriteReport"/>
+    <bpmn:sequenceFlow id="flow_report_end" sourceRef="Task_WriteReport" targetRef="End_Reported"/>
+
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="Diagram_legacy">
+    <bpmndi:BPMNPlane id="Plane_legacy" bpmnElement="Process_LEGACY_DFIR">
+      <bpmndi:BPMNShape id="Start_Case_di" bpmnElement="Start_Case">
+        <dc:Bounds x="60" y="280" width="36" height="36"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Acquire_di" bpmnElement="Task_Acquire">
+        <dc:Bounds x="140" y="258" width="170" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_CoC_di" bpmnElement="Task_CoC">
+        <dc:Bounds x="330" y="258" width="170" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_TriageBrief_di" bpmnElement="Task_TriageBrief">
+        <dc:Bounds x="520" y="258" width="190" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RunMmls_di" bpmnElement="Task_RunMmls">
+        <dc:Bounds x="730" y="258" width="190" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RunFls_di" bpmnElement="Task_RunFls">
+        <dc:Bounds x="940" y="258" width="190" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Recover_di" bpmnElement="Task_Recover">
+        <dc:Bounds x="1150" y="258" width="190" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RegistryParse_di" bpmnElement="Task_RegistryParse">
+        <dc:Bounds x="1360" y="258" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_EvtxParse_di" bpmnElement="Task_EvtxParse">
+        <dc:Bounds x="1600" y="258" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Timeline_di" bpmnElement="Task_Timeline">
+        <dc:Bounds x="1840" y="258" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Strings_di" bpmnElement="Task_Strings">
+        <dc:Bounds x="2080" y="258" width="190" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Correlate_di" bpmnElement="Task_Correlate">
+        <dc:Bounds x="2290" y="258" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gw_FoundIt_di" bpmnElement="Gw_FoundIt" isMarkerVisible="true">
+        <dc:Bounds x="2540" y="273" width="50" height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_RethinkAndRetry_di" bpmnElement="Task_RethinkAndRetry">
+        <dc:Bounds x="2480" y="400" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_WriteReport_di" bpmnElement="Task_WriteReport">
+        <dc:Bounds x="2620" y="258" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Reported_di" bpmnElement="End_Reported">
+        <dc:Bounds x="2870" y="280" width="36" height="36"/>
+      </bpmndi:BPMNShape>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Defs_findevil"
+                  targetNamespace="http://findevil.io/bpmn">
+  <bpmn:process id="Process_FINDEVIL_IABF" name="FIND EVIL! IABF Agent Workflow" isExecutable="false">
+
+    <bpmn:startEvent id="Start_Evidence" name="Receive evidence (E01 / RAW / PCAP / EVTX)">
+      <bpmn:outgoing>flow_start_probe</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:task id="Task_Probe" name="Auto-probe: file, sha256sum, mmls, fsstat, xxd, OS hint">
+      <bpmn:incoming>flow_start_probe</bpmn:incoming>
+      <bpmn:outgoing>flow_probe_index</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_BuildIndex" name="Build &amp; cache MFT name index (fls -r) once per image SHA-256">
+      <bpmn:incoming>flow_probe_index</bpmn:incoming>
+      <bpmn:outgoing>flow_index_be</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_BulkPrepass" name="Pre-pass: bulk_extractor -E email -E url -E ip -E ether">
+      <bpmn:incoming>flow_index_be</bpmn:incoming>
+      <bpmn:outgoing>flow_be_autoconfirm</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_AutoConfirm" name="Auto-confirm probe facts: SHA-256, NTFS detection, OS from MBR string">
+      <bpmn:incoming>flow_be_autoconfirm</bpmn:incoming>
+      <bpmn:outgoing>flow_autoconfirm_iter</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Phase1" name="Phase 1 — Narrative reconstruction (LLM, grounded in probe + bulk_extractor)">
+      <bpmn:incoming>flow_autoconfirm_iter</bpmn:incoming>
+      <bpmn:incoming>flow_loop_back</bpmn:incoming>
+      <bpmn:outgoing>flow_p1_p2</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Phase2" name="Phase 2 — Generate 1-3 MITRE-mapped, falsifiable hypotheses with tool plans">
+      <bpmn:incoming>flow_p1_p2</bpmn:incoming>
+      <bpmn:outgoing>flow_p2_split</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:parallelGateway id="Gw_FanOut" name="Fan out (isolation principle)">
+      <bpmn:incoming>flow_p2_split</bpmn:incoming>
+      <bpmn:outgoing>flow_h1</bpmn:outgoing>
+      <bpmn:outgoing>flow_h2</bpmn:outgoing>
+      <bpmn:outgoing>flow_h3</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:task id="Task_H1" name="Investigate H1 (guardrailed tool exec + LLM verdict)">
+      <bpmn:incoming>flow_h1</bpmn:incoming>
+      <bpmn:outgoing>flow_h1_join</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="Task_H2" name="Investigate H2 (guardrailed tool exec + LLM verdict)">
+      <bpmn:incoming>flow_h2</bpmn:incoming>
+      <bpmn:outgoing>flow_h2_join</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="Task_H3" name="Investigate H3 (guardrailed tool exec + LLM verdict)">
+      <bpmn:incoming>flow_h3</bpmn:incoming>
+      <bpmn:outgoing>flow_h3_join</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:parallelGateway id="Gw_Join" name="Join parallel investigations">
+      <bpmn:incoming>flow_h1_join</bpmn:incoming>
+      <bpmn:incoming>flow_h2_join</bpmn:incoming>
+      <bpmn:incoming>flow_h3_join</bpmn:incoming>
+      <bpmn:outgoing>flow_join_upgrade</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:task id="Task_AutoUpgrade" name="Auto-upgrade verdict: inconclusive + rich evidence_for → confirmed">
+      <bpmn:incoming>flow_join_upgrade</bpmn:incoming>
+      <bpmn:outgoing>flow_upgrade_p4</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:task id="Task_Phase4" name="Phase 4 — Feedback loop: update narrative, log self-corrections, set next priority">
+      <bpmn:incoming>flow_upgrade_p4</bpmn:incoming>
+      <bpmn:outgoing>flow_p4_decide</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:exclusiveGateway id="Gw_Done" name="Root cause reached (conf ≥ 0.5) OR stagnation (≥3 barren iters) OR max_iter?">
+      <bpmn:incoming>flow_p4_decide</bpmn:incoming>
+      <bpmn:outgoing>flow_loop_back</bpmn:outgoing>
+      <bpmn:outgoing>flow_done</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:task id="Task_Report" name="Generate JSON report + save audit JSONL">
+      <bpmn:incoming>flow_done</bpmn:incoming>
+      <bpmn:outgoing>flow_report_end</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:endEvent id="End_Done" name="Investigation complete">
+      <bpmn:incoming>flow_report_end</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="flow_start_probe" sourceRef="Start_Evidence" targetRef="Task_Probe"/>
+    <bpmn:sequenceFlow id="flow_probe_index" sourceRef="Task_Probe" targetRef="Task_BuildIndex"/>
+    <bpmn:sequenceFlow id="flow_index_be" sourceRef="Task_BuildIndex" targetRef="Task_BulkPrepass"/>
+    <bpmn:sequenceFlow id="flow_be_autoconfirm" sourceRef="Task_BulkPrepass" targetRef="Task_AutoConfirm"/>
+    <bpmn:sequenceFlow id="flow_autoconfirm_iter" sourceRef="Task_AutoConfirm" targetRef="Task_Phase1"/>
+    <bpmn:sequenceFlow id="flow_p1_p2" sourceRef="Task_Phase1" targetRef="Task_Phase2"/>
+    <bpmn:sequenceFlow id="flow_p2_split" sourceRef="Task_Phase2" targetRef="Gw_FanOut"/>
+    <bpmn:sequenceFlow id="flow_h1" sourceRef="Gw_FanOut" targetRef="Task_H1"/>
+    <bpmn:sequenceFlow id="flow_h2" sourceRef="Gw_FanOut" targetRef="Task_H2"/>
+    <bpmn:sequenceFlow id="flow_h3" sourceRef="Gw_FanOut" targetRef="Task_H3"/>
+    <bpmn:sequenceFlow id="flow_h1_join" sourceRef="Task_H1" targetRef="Gw_Join"/>
+    <bpmn:sequenceFlow id="flow_h2_join" sourceRef="Task_H2" targetRef="Gw_Join"/>
+    <bpmn:sequenceFlow id="flow_h3_join" sourceRef="Task_H3" targetRef="Gw_Join"/>
+    <bpmn:sequenceFlow id="flow_join_upgrade" sourceRef="Gw_Join" targetRef="Task_AutoUpgrade"/>
+    <bpmn:sequenceFlow id="flow_upgrade_p4" sourceRef="Task_AutoUpgrade" targetRef="Task_Phase4"/>
+    <bpmn:sequenceFlow id="flow_p4_decide" sourceRef="Task_Phase4" targetRef="Gw_Done"/>
+    <bpmn:sequenceFlow id="flow_loop_back" name="No — keep iterating" sourceRef="Gw_Done" targetRef="Task_Phase1"/>
+    <bpmn:sequenceFlow id="flow_done" name="Yes — exit loop" sourceRef="Gw_Done" targetRef="Task_Report"/>
+    <bpmn:sequenceFlow id="flow_report_end" sourceRef="Task_Report" targetRef="End_Done"/>
+
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="Diagram_findevil">
+    <bpmndi:BPMNPlane id="Plane_findevil" bpmnElement="Process_FINDEVIL_IABF">
+      <bpmndi:BPMNShape id="Start_Evidence_di" bpmnElement="Start_Evidence">
+        <dc:Bounds x="60" y="280" width="36" height="36"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Probe_di" bpmnElement="Task_Probe">
+        <dc:Bounds x="140" y="258" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_BuildIndex_di" bpmnElement="Task_BuildIndex">
+        <dc:Bounds x="320" y="258" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_BulkPrepass_di" bpmnElement="Task_BulkPrepass">
+        <dc:Bounds x="500" y="258" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_AutoConfirm_di" bpmnElement="Task_AutoConfirm">
+        <dc:Bounds x="680" y="258" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Phase1_di" bpmnElement="Task_Phase1">
+        <dc:Bounds x="880" y="258" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Phase2_di" bpmnElement="Task_Phase2">
+        <dc:Bounds x="1080" y="258" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gw_FanOut_di" bpmnElement="Gw_FanOut">
+        <dc:Bounds x="1290" y="273" width="50" height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_H1_di" bpmnElement="Task_H1">
+        <dc:Bounds x="1380" y="148" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_H2_di" bpmnElement="Task_H2">
+        <dc:Bounds x="1380" y="258" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_H3_di" bpmnElement="Task_H3">
+        <dc:Bounds x="1380" y="368" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gw_Join_di" bpmnElement="Gw_Join">
+        <dc:Bounds x="1600" y="273" width="50" height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_AutoUpgrade_di" bpmnElement="Task_AutoUpgrade">
+        <dc:Bounds x="1690" y="258" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Phase4_di" bpmnElement="Task_Phase4">
+        <dc:Bounds x="1890" y="258" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gw_Done_di" bpmnElement="Gw_Done" isMarkerVisible="true">
+        <dc:Bounds x="2120" y="273" width="50" height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Report_di" bpmnElement="Task_Report">
+        <dc:Bounds x="2210" y="258" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Done_di" bpmnElement="End_Done">
+        <dc:Bounds x="2420" y="280" width="36" height="36"/>
+      </bpmndi:BPMNShape>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
