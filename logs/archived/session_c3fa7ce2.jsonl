@@ -1,0 +1,2 @@
+{"timestamp": "2026-04-15T08:10:00.786594+00:00", "session_id": "c3fa7ce2", "event_type": "llm_call", "model": "fake-llm", "tokens": {"total_tokens": 0}, "latency_ms": 0.0, "purpose": "phase1_narrative"}
+{"timestamp": "2026-04-15T08:10:00.787058+00:00", "session_id": "c3fa7ce2", "event_type": "narrative", "iteration": 0, "narrative": "NARRATIVE: user ran powershell. KEY UNKNOWNS: target."}

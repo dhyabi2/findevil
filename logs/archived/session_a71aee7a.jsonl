@@ -1,0 +1,4 @@
+{"timestamp": "2026-04-15T08:10:53.335460+00:00", "session_id": "a71aee7a", "event_type": "llm_call", "model": "fake-llm", "tokens": {"total_tokens": 0}, "latency_ms": 0.0, "purpose": "phase1_narrative"}
+{"timestamp": "2026-04-15T08:10:53.335696+00:00", "session_id": "a71aee7a", "event_type": "narrative", "iteration": 0, "narrative": "NARRATIVE: initial."}
+{"timestamp": "2026-04-15T08:10:53.335772+00:00", "session_id": "a71aee7a", "event_type": "llm_call", "model": "fake-llm", "tokens": {"total_tokens": 0}, "latency_ms": 0.0, "purpose": "phase1_narrative"}
+{"timestamp": "2026-04-15T08:10:53.335812+00:00", "session_id": "a71aee7a", "event_type": "narrative", "iteration": 1, "narrative": "NARRATIVE: updated after evidence."}

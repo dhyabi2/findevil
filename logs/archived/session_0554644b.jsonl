@@ -1,0 +1,1 @@
+{"timestamp": "2026-04-15T07:30:34.449493+00:00", "session_id": "0554644b", "event_type": "guardrail_violation", "detail": "Command matches blocked pattern: \\brm\\s+(-[rRf]+\\s+|.*--no-preserve-root)", "command": "rm -rf /"}

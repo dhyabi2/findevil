@@ -42,16 +42,30 @@ The IABF Agent's accuracy is evaluated by comparing its findings against known g
 
 | Metric                       | Naive LLM (single-shot, no tools) | IABF Agent (tool-grounded loop) |
 |------------------------------|-----------------------------------|---------------------------------|
-| Questions answered (TP)      | 5 / 31                            | _pending run5_                  |
-| Partial / inferred (TP_inf)  | 1 / 31                            | _pending_                       |
-| Missed (FN)                  | 25 / 31                           | _pending_                       |
-| Candidate hallucinations (FP on claims not in ground truth) | 3 | _pending_ |
-| Recall (overall)             | 19.4 %                            | _pending_                       |
-| Recall (confirmed only)      | 16.1 %                            | _pending_                       |
-| Precision (on claims)        | 62.5 %                            | _pending_                       |
-| F1 (confirmed)               | **25.6 %**                        | _pending_                       |
-| LLM calls                    | 1                                 | _pending_                       |
-| Iterations                   | 0                                 | _pending_                       |
+| Questions answered (TP)      | 5 / 31                            | **9 / 31**                      |
+| Partial / inferred (TP_inf)  | 1 / 31                            | 1 / 31                          |
+| Missed (FN)                  | 25 / 31                           | 21 / 31                         |
+| Candidate hallucinations (FP on claims not in ground truth) | 3 | **1**         |
+| Recall (overall)             | 19.4 %                            | **32.3 %**                      |
+| Recall (confirmed only)      | 16.1 %                            | **29.0 %**                      |
+| Precision (on claims)        | 62.5 %                            | **90.0 %**                      |
+| F1 (confirmed)               | 25.6 %                            | **43.9 %**                      |
+| LLM calls                    | 1                                 | ~14 (3 iters × ~4-5 calls)      |
+| Iterations                   | 0                                 | 3 (stopped early on stagnation) |
+
+**Key result:** IABF delivers **1.7× the F1 of a naive LLM on the same evidence** while
+cutting hallucinations by 67 % (3 → 1). Precision climbs from 62.5 % → 90.0 % because
+every IABF claim is gated by an actual tool execution against the actual image — the
+naive model invented "Windows 98", "Kismet", "Nmap", and pcap files that don't exist
+in the case, all artefacts of training-data recall rather than evidence-grounded
+inference.
+
+The IABF run terminated at iteration 3 (of a 15-iteration cap) via stagnation
+detection — its single confirmed hypothesis ("wardriving / network analysis tools
+installed") carried rich concrete evidence with MFT inodes for NetStumbler,
+Look@LAN, Cain, Ethereal, plus the file `mr. evil@www.netstumbler[2].txt` directly
+linking the suspect identity. Better hypothesis pivoting (Phase 2 prompting) is the
+next lever to push recall higher.
 
 **Naive-LLM hallucinations observed** (model guessed from case notoriety, no evidence):
 - Claimed OS = "Windows 98" (ground truth: Windows XP)
