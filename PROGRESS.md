@@ -25,9 +25,9 @@ We have the numbers: **IABF F1 = 32.4 % vs naive LLM 27.8 %, with 100 % precisio
 
 ## 🎯 NEXT UP (submission-blocking)
 
-- [ ] **S1** — Wait for run8 to finish (in progress); re-score; update ACCURACY.md if better than run7
-- [ ] **S2** — `git push -u origin main` to publish on GitHub (needs user's GitHub token/ssh)
-- [ ] **S3** — Tag `v1.0` release on GitHub (after S2)
+- [x] **S1** — Run8 scored: F1 21.6 % / precision 66.7 % — worse than run7 (stagnation at iter 6, only 3 confirmed). ACCURACY.md kept at run7 numbers.
+- [x] **S2** — Pushed to https://github.com/dhyabi2/findevil (2026-04-15)
+- [x] **S3** — Tagged `v1.0` and pushed (2026-04-15)
 - [ ] **S4** — Record 5-min video using `docs/video/` kit
 - [ ] **S5** — Submit to Devpost using `docs/devpost/SUBMISSION.md` copy
 
@@ -35,7 +35,7 @@ We have the numbers: **IABF F1 = 32.4 % vs naive LLM 27.8 %, with 100 % precisio
 
 ## 🔨 IN PROGRESS
 
-- [ ] **S1** — run8 mid-flight (iter 5/15 with 2 confirmed; auto-upgrade fix #2 firing as designed)
+_(nothing in flight)_
 
 ---
 
