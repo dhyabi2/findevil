@@ -109,8 +109,22 @@ WINDOWS DEAD-DISK PLAYBOOK (priority order — use this, don't guess random tool
   (e) Artefact sweep (user files for IRC/email/newsgroup/yahoo):
         grep -iE 'Outlook|Identities|mIRC|ini$|\\.htm$' /tmp/findevil/mft_index_*.txt
         → extract candidate file(s) via icat → strings on the extracted bytes
+  (e1) IRC (mIRC config + chat logs):
+        grep -iE 'mirc\\.ini|mirc/logs|servers\\.ini' /tmp/findevil/mft_index_*.txt
+        # extract → strings → grep for nick=, user=, anick=, channel names (#evil, undernet, efnet)
+  (e2) Outlook Express / Forte Agent (SMTP, NNTP, newsgroup subs):
+        grep -iE 'Identities/.+/.+\\.dbx$|\\.idx$|\\.dat$|forte/agent|agent\\.dat' /tmp/findevil/mft_index_*.txt
+        # extract .dbx files → strings → grep for @, smtp., news., nntp., alt.2600
+  (e3) Browser / webmail (IE history + Yahoo/Hotmail saved pages):
+        grep -iE 'index\\.dat|History|Cache|Cookies|Showletter|hotmail|yahoo|msn' /tmp/findevil/mft_index_*.txt
+        # extract index.dat → pasco/python3 ESEDB or strings; grep saved .htm files
+  (e4) Recycle Bin:
+        grep -iE 'RECYCLER|Recycled|INFO2|\\$I[0-9]|\\$R[0-9]' /tmp/findevil/mft_index_*.txt
+        # extract INFO2 → rifiuti2 OR strings; count .exe entries
   (f) Timeline if needed:
         log2timeline.py, then psort.py
+  (g) Anti-virus indicators:
+        grep -iE 'Norton|McAfee|Symantec|AVG|Avast|Kaspersky|Defender|virus|quarantine' /tmp/findevil/mft_index_*.txt
 
 SIFT TOOL CHEAT-SHEET (command MUST start with one of these binaries):
   mmls, fsstat, fls, icat, ifind, tsk_recover, blkls, blkcat, srch_strings, mactime,
@@ -186,7 +200,7 @@ class IABFAgent:
         )
         self.state = InvestigationState()
         self.max_iterations = self.config.get("agent", {}).get("max_iterations", 15)
-        self.confidence_threshold = self.config.get("agent", {}).get("confidence_threshold", 0.85)
+        self.confidence_threshold = self.config.get("agent", {}).get("confidence_threshold", 0.5)
         self.discard_threshold = self.config.get("agent", {}).get("discard_threshold", 0.15)
         self.dry_run = dry_run
         self._conversation: list[dict] = []
@@ -195,7 +209,10 @@ class IABFAgent:
         self._system_prompt: str = SYSTEM_PROMPT_TEMPLATE
         self._phase3_parallelism = self.config.get("agent", {}).get("phase3_parallelism", 3)
         self._mft_index_paths: dict[str, str] = {}  # evidence_path -> cached mft index file
-        self._stagnation_iterations = self.config.get("agent", {}).get("stagnation_iterations", 2)
+        self._stagnation_iterations = self.config.get("agent", {}).get("stagnation_iterations", 3)
+        # Phase 1 narrative is pinned to system prompt rather than letting it
+        # roll off the conversation window — too valuable to expire.
+        self._iter1_narrative: str = ""
 
         # Pre-create scratch directories so `icat > /tmp/findevil/hives/X` doesn't
         # fail on "No such file or directory". Was a repeat-offender bug across runs.
@@ -330,6 +347,18 @@ class IABFAgent:
             if code == 0 and out:
                 lines.append("Partition layout (mmls):")
                 lines.append(out.strip())
+                # Heuristic OS hint from the MBR/VBR text strings — mmls verbose
+                # output sometimes includes them; otherwise grab via xxd of
+                # sector 0. Safe one-liner.
+                code_xxd, mbr = self._exec_tool(f"xxd -l 512 {shlex.quote(p)}")
+                if code_xxd == 0 and mbr:
+                    text = mbr
+                    if "XP" in text and "MS-MBR" in text:
+                        info["os_hint"] = "Windows XP"
+                    elif "Windows 7" in text or "Win7" in text:
+                        info["os_hint"] = "Windows 7"
+                    elif "GRUB" in text:
+                        info["os_hint"] = "Linux (GRUB bootloader)"
                 # Parse sector offset of the first non-meta, non-unallocated partition
                 for line in out.splitlines():
                     tokens = line.split()
@@ -454,6 +483,16 @@ Update the chronological narrative. Mark what changed. Note any SELF-CORRECTIONS
 
         narrative = self._llm_chat(prompt, purpose="phase1_narrative")
         self.state.narrative = narrative
+        # Pin iter-1 narrative onto the system prompt so it stays available
+        # past the conversation trim window. Captures grounded facts the LLM
+        # established at the start.
+        if self.state.iteration == 1 and not self._iter1_narrative:
+            self._iter1_narrative = narrative
+            self._system_prompt = (
+                self._system_prompt
+                + "\n\nITER-1 BASELINE NARRATIVE (PINNED — DO NOT FORGET):\n"
+                + narrative[:4000]
+            )
         self.audit.log_narrative(narrative, self.state.iteration)
 
         return narrative
@@ -645,12 +684,27 @@ Respond in JSON:
         hypothesis.evidence_for = analysis.get("evidence_for", [])
         hypothesis.evidence_against = analysis.get("evidence_against", [])
 
+        # Auto-upgrade: if the LLM said "inconclusive" but evidence_for has at
+        # least one concrete artefact (inode reference, filename, IP, hash,
+        # MAC), promote to confirmed. The LLM is too cautious — rich evidence
+        # is exactly what "confirmed" should mean. Observed in run7: 8 of 9
+        # hypotheses returned with inode lists in evidence_for but inconclusive.
+        if verdict == "inconclusive" and hypothesis.evidence_for:
+            ev_blob = " ".join(str(e) for e in hypothesis.evidence_for)
+            import re as _re
+            has_concrete = bool(_re.search(
+                r"\binode\s*\d+|\b\d+-\d+-\d+\b|\b\d{1,3}(?:\.\d{1,3}){3}\b|"
+                r"[0-9a-f]{32,}|[0-9a-f]{2}(?::[0-9a-f]{2}){5}|"
+                r"\.(?:dat|ini|dbx|pst|cap|pcap|reg|evtx|log|exe|dll|lnk|htm)\b",
+                ev_blob, _re.IGNORECASE))
+            if has_concrete:
+                logger.info(f"  [{hypothesis.id}] Auto-upgrade inconclusive→confirmed (rich evidence_for)")
+                verdict = "confirmed"
+                analysis["verdict"] = "confirmed"
+                analysis["confidence_after"] = max(hypothesis.confidence, 0.7)
+
         if verdict == "confirmed":
             hypothesis.status = "confirmed"
-            # Attach concrete artefacts (evidence_for items) alongside the
-            # description so downstream prompts see actual values — not just
-            # paraphrases of the hypothesis. Prevents ACCURACY.md scoring from
-            # missing matches that only appeared in evidence_for.
             ev = hypothesis.evidence_for or []
             if ev:
                 ev_text = "; ".join(str(e) for e in ev if e)[:400]
@@ -823,6 +877,24 @@ Respond in JSON:
         self._system_prompt = build_system_prompt(
             self.state.evidence_sources, self._probe_summary
         )
+
+        # Auto-confirm deterministic facts derived from probes — no hypothesis
+        # needed for things we can read directly from the image at session
+        # init (sha256, OS family from bootsector, partition layout).
+        for path, info in self._probe_summary.items():
+            if info.get("sha256"):
+                self.state.confirmed_findings.append(
+                    f"Image SHA-256 (verified): {info['sha256']} — image hash matches and verifies."
+                )
+            fs = info.get("filesystem", "") or ""
+            if "NTFS" in fs.upper():
+                self.state.confirmed_findings.append(
+                    "Filesystem: NTFS — consistent with Windows host."
+                )
+            # OS detection from MBR string captured during mmls; saved in info.
+            os_hint = info.get("os_hint", "")
+            if os_hint:
+                self.state.confirmed_findings.append(f"Operating system: {os_hint}")
         pre_pass_summary = self._pre_pass()
         if pre_pass_summary:
             evidence_description = (

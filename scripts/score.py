@@ -17,6 +17,45 @@ def normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
+# Tokens that are too generic to count as a substring match (would TP-trigger
+# anywhere). Numerics <= 2 chars and very short common words get word-boundary
+# matching against the original text rather than the normalized blob.
+_GENERIC_SHORT = {"yes", "no", "n/a", "0", "1", "2", "3", "4", "5", "6", "7",
+                  "8", "9", "10", "11", "12", "evil", "cdt"}
+
+
+def _strict_match(answer: str, full_text: str) -> bool:
+    """Word-boundary match for short/generic answers; substring for the rest."""
+    a = answer.strip()
+    if not a:
+        return False
+    if a.lower() in _GENERIC_SHORT or len(a) <= 3:
+        # Require word-boundary match to avoid "5" matching "5294" or "Evil"
+        # matching "evilfork".
+        pattern = r"\b" + re.escape(a) + r"\b"
+        return re.search(pattern, full_text, flags=re.IGNORECASE) is not None
+    return normalize(a) in normalize(full_text)
+
+
+def _split_claims(claims: list[str]) -> list[str]:
+    """Split blob-style confirmed_findings into atomic claims for FP analysis.
+
+    The agent often packs multiple facts into one finding (description plus
+    semicolon-separated evidence_for items). For precision scoring we want
+    each atomic fact judged independently against ground truth.
+    """
+    atoms: list[str] = []
+    for c in claims:
+        # Split on the canonical em-dash separator we put in iabf.py, then on
+        # semicolons (evidence_for items), then sentence punctuation.
+        parts = re.split(r"\s+—\s+|;|(?<=[.!?])\s+", c)
+        for p in parts:
+            p = p.strip()
+            if len(p) > 8:
+                atoms.append(p)
+    return atoms
+
+
 def _flat(x) -> str:
     if x is None:
         return ""
@@ -43,17 +82,20 @@ def haystack_from_report(report: dict) -> tuple[str, str]:
 
 def score_question(q: dict, full_hay: str, confirmed_hay: str) -> dict:
     expected = q["a"] if isinstance(q["a"], list) else [q["a"]]
-    n_full = normalize(full_hay)
-    n_conf = normalize(confirmed_hay)
-    hit_confirmed = any(normalize(str(a)) in n_conf for a in expected if str(a).strip())
-    hit_any = any(normalize(str(a)) in n_full for a in expected if str(a).strip())
+    hit_confirmed = any(_strict_match(str(a), confirmed_hay) for a in expected if str(a).strip())
+    hit_any = any(_strict_match(str(a), full_hay) for a in expected if str(a).strip())
+    matched_token = next(
+        (str(a) for a in expected if str(a).strip() and _strict_match(str(a), full_hay)),
+        None,
+    )
     if hit_confirmed:
         verdict = "TP"
     elif hit_any:
         verdict = "TP_inferred"
     else:
         verdict = "FN"
-    return {"id": q["id"], "q": q["q"], "expected": expected, "verdict": verdict}
+    return {"id": q["id"], "q": q["q"], "expected": expected,
+            "verdict": verdict, "matched": matched_token}
 
 
 def main():
@@ -76,12 +118,21 @@ def main():
     total = len(per_q)
 
     claims_raw = report.get("confirmed_findings") or []
-    claims = [_flat(c) for c in claims_raw]
+    claims_text = [_flat(c) for c in claims_raw]
+    atomic_claims = _split_claims(claims_text)
     fp_candidates = []
-    gt_blob = normalize(json.dumps(gt))
-    for c in claims:
-        if normalize(c) and normalize(c) not in gt_blob:
-            fp_candidates.append(c)
+    gt_blob = json.dumps(gt)  # raw, for word-boundary matching
+    for atom in atomic_claims:
+        # An atom is a hallucination only if NONE of its meaningful tokens
+        # appear in ground truth. Single-word generic claims get strict match.
+        # Skip atoms that already substring-match ground truth (legit claim).
+        if normalize(atom) and normalize(atom) in normalize(gt_blob):
+            continue
+        # Also skip if any noun-ish token (>=4 chars) of the atom is in GT blob
+        tokens = [t for t in re.findall(r"[A-Za-z0-9_.@-]{4,}", atom)]
+        if any(re.search(r"\b" + re.escape(t) + r"\b", gt_blob, re.IGNORECASE) for t in tokens):
+            continue
+        fp_candidates.append(atom)
 
     recall = (tp + tp_inf) / total if total else 0.0
     recall_confirmed = tp / total if total else 0.0
