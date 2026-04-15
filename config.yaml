@@ -15,8 +15,9 @@ llm:
     default_model: "google/gemma-4-31b-it"
     fallback_model: "google/gemma-3-27b-it"
     max_tokens: 8192
-    temperature: 0.2                         # Low temp for analytical precision
+    temperature: 0.05                        # Near-deterministic (fix #2: run7→run8 variance)
     top_p: 0.9
+    seed: 42                                 # Reproducibility (fix #2)
     # Optional: route preferences
     route: "fallback"                        # fallback | priority
     # Optional: site info for OpenRouter rankings

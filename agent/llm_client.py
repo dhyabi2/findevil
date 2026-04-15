@@ -38,6 +38,7 @@ class LLMConfig:
     top_p: float = 0.9
     site_url: str = "https://github.com/dhyabi2/findevil"
     site_name: str = "FIND EVIL IABF Agent"
+    seed: int | None = None
 
     @classmethod
     def from_yaml(cls, config: dict) -> "LLMConfig":
@@ -62,6 +63,7 @@ class LLMConfig:
             top_p=provider_cfg.get("top_p", cls.top_p),
             site_url=provider_cfg.get("site_url", cls.site_url),
             site_name=provider_cfg.get("site_name", cls.site_name),
+            seed=provider_cfg.get("seed"),
         )
 
 
@@ -117,11 +119,14 @@ class LLMClient:
         if response_format:
             payload["response_format"] = response_format
 
+        if self.config.seed is not None:
+            payload["seed"] = self.config.seed
+
         url = f"{self.config.base_url}/chat/completions"
 
         start = time.monotonic()
 
-        def _post_with_retry(pl: dict, max_attempts: int = 3) -> httpx.Response:
+        def _post_with_retry(pl: dict, max_attempts: int = 6) -> httpx.Response:
             """POST with exponential backoff on transient errors (DNS, timeout, 5xx)."""
             last_exc: Exception | None = None
             for attempt in range(max_attempts):

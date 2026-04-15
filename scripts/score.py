@@ -40,17 +40,29 @@ def _strict_match(answer: str, full_text: str) -> bool:
 def _split_claims(claims: list[str]) -> list[str]:
     """Split blob-style confirmed_findings into atomic claims for FP analysis.
 
-    The agent often packs multiple facts into one finding (description plus
-    semicolon-separated evidence_for items). For precision scoring we want
-    each atomic fact judged independently against ground truth.
+    Splits on em-dashes, semicolons, and sentence-end punctuation — but only
+    when followed by whitespace AND not inside a quoted/bracketed token. Fix #6:
+    run8 produced artefact FPs like "evil@www.netstumbler[2].txt' (inode
+    11981), directly linking the alias 'Mr." because atom-split cut mid-quote.
     """
     atoms: list[str] = []
     for c in claims:
-        # Split on the canonical em-dash separator we put in iabf.py, then on
-        # semicolons (evidence_for items), then sentence punctuation.
-        parts = re.split(r"\s+—\s+|;|(?<=[.!?])\s+", c)
+        # Mask single-quoted and double-quoted substrings, and bracketed tokens,
+        # so punctuation inside them can't be used as split boundaries.
+        masked = c
+        preserved: list[str] = []
+
+        def _mask(m):
+            preserved.append(m.group(0))
+            return f"\x00{len(preserved) - 1}\x00"
+        masked = re.sub(r"'[^']{1,120}'|\"[^\"]{1,120}\"|\[[^\]]{1,40}\]", _mask, masked)
+
+        parts = re.split(r"\s+—\s+|;\s+|(?<=[.!?])\s+(?=[A-Z])", masked)
+        # Unmask each part
+        def _unmask(s: str) -> str:
+            return re.sub(r"\x00(\d+)\x00", lambda m: preserved[int(m.group(1))], s)
         for p in parts:
-            p = p.strip()
+            p = _unmask(p).strip().rstrip(".,;:")
             if len(p) > 8:
                 atoms.append(p)
     return atoms

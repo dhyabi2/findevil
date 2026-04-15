@@ -42,30 +42,31 @@ The IABF Agent's accuracy is evaluated by comparing its findings against known g
 
 | Metric                       | Naive LLM (single-shot, no tools) | IABF Agent (tool-grounded loop) |
 |------------------------------|-----------------------------------|---------------------------------|
-| Questions answered (TP)      | 5 / 31                            | **9 / 31**                      |
-| Partial / inferred (TP_inf)  | 1 / 31                            | 1 / 31                          |
-| Missed (FN)                  | 25 / 31                           | 21 / 31                         |
-| Candidate hallucinations (FP on claims not in ground truth) | 3 | **1**         |
-| Recall (overall)             | 19.4 %                            | **32.3 %**                      |
-| Recall (confirmed only)      | 16.1 %                            | **29.0 %**                      |
-| Precision (on claims)        | 62.5 %                            | **90.0 %**                      |
-| F1 (confirmed)               | 25.6 %                            | **43.9 %**                      |
-| LLM calls                    | 1                                 | ~14 (3 iters × ~4-5 calls)      |
-| Iterations                   | 0                                 | 3 (stopped early on stagnation) |
+| Questions answered (TP)      | 5 / 31                            | **11 / 31**                     |
+| Partial / inferred (TP_inf)  | 1 / 31                            | 2 / 31                          |
+| Missed (FN)                  | 25 / 31                           | 18 / 31                         |
+| Candidate hallucinations (FP on claims not in ground truth) | 3 | 4                |
+| Recall (overall)             | 19.4 %                            | **41.9 %**                      |
+| Recall (confirmed only)      | 16.1 %                            | **35.5 %**                      |
+| Precision (on claims)        | 62.5 %                            | **73.3 %**                      |
+| F1 (confirmed)               | 25.6 %                            | **47.8 %**                      |
+| LLM calls                    | 1                                 | 42 (7 iters × ~6 calls)         |
+| Iterations                   | 0                                 | 7 (coverage-terminated at 8/10) |
 
-**Key result:** IABF delivers **1.7× the F1 of a naive LLM on the same evidence** while
-cutting hallucinations by 67 % (3 → 1). Precision climbs from 62.5 % → 90.0 % because
-every IABF claim is gated by an actual tool execution against the actual image — the
+**Key result:** IABF delivers **1.87× the F1 of a naive LLM on the same evidence**.
+Every IABF claim is gated by an actual tool execution against the actual image — the
 naive model invented "Windows 98", "Kismet", "Nmap", and pcap files that don't exist
 in the case, all artefacts of training-data recall rather than evidence-grounded
 inference.
 
-The IABF run terminated at iteration 3 (of a 15-iteration cap) via stagnation
-detection — its single confirmed hypothesis ("wardriving / network analysis tools
-installed") carried rich concrete evidence with MFT inodes for NetStumbler,
-Look@LAN, Cain, Ethereal, plus the file `mr. evil@www.netstumbler[2].txt` directly
-linking the suspect identity. Better hypothesis pivoting (Phase 2 prompting) is the
-next lever to push recall higher.
+The IABF run terminated at iteration 7 (of a 15-iteration cap) via **coverage-based
+auto-completion** (≥8 of 10 high-value DFIR categories confirmed). Automated
+pre-pass extracted the SOFTWARE/SAM/SYSTEM registry hives up-front, so hypotheses
+could focus on deeper artefacts (mIRC logs, Look@LAN `irunin.ini`, Ethereal capture
+traces) rather than re-deriving the hive extraction plan each iteration. Confirmed
+findings chain back through MFT inodes for NetStumbler, Look@LAN, Cain, Ethereal,
+mIRC's `#Elite.Hackers.UnderNet.log`, the `irunin.ini` network identity file, and
+the Hotmail-saved HTML — each with tool output in the audit trail.
 
 **Naive-LLM hallucinations observed** (model guessed from case notoriety, no evidence):
 - Claimed OS = "Windows 98" (ground truth: Windows XP)

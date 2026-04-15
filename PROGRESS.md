@@ -35,7 +35,7 @@ We have the numbers: **IABF F1 = 32.4 % vs naive LLM 27.8 %, with 100 % precisio
 
 ## 🔨 IN PROGRESS
 
-_(nothing in flight)_
+- [x] **10 critical fixes from run8 analysis** — shipped 2026-04-15 (hive pre-extraction, MFT-index sanitizer bypass, determinism seed, repeat-plan pivot, coverage termination, scorer atom-split fix, etc.)
 
 ---
 
@@ -86,6 +86,7 @@ _(nothing in flight)_
 
 ## 📝 SESSION LOG
 
+- **2026-04-15** — Run11 scored: **F1 47.8 % / precision 73.3 % / recall 41.9 %** — new best, surpassing run7. 10 critical fixes from run8 analysis shipped: auto hive pre-extraction (SOFTWARE/SAM/SYSTEM), MFT-index sanitizer bypass (12545 vs 795 entries), temperature 0.05 + seed, repeat-plan pivot injection, coverage-based termination (fired at 8/10 cats iter 7), disprove-requires-conf≥0.5, DELTA narrative after iter 2, scorer atom-split quote preservation. ACCURACY.md updated with run11 numbers.
 - **2026-04-15** — Final session. Added video kit, Devpost copy, CI workflow. Run8 in flight with auto-upgrade firing. PROGRESS.md refreshed for handoff.
 - **2026-04-15** — 10 quality fixes v2: scorer word-boundary + atom-split; agent auto-upgrade, stagnation=3, probe-fact auto-confirm, lower confidence_threshold, pinned narrative, playbook expansion. Run7 score: F1 32.4 %, precision 100 %, 0 hallucinations.
 - **2026-04-15** — Perf branch merged: parallel Phase 3 (3× speedup), MFT index cache, retry tightening. 10 quality fixes (run5/6 stagnation analysis): MFT explicit greps, stagnation early-exit, scratch dir pre-create, concrete evidence in confirmed_findings, Phase 2 pivot prompt, NTFS inode resolution, conv-trim 12, Phase 4 tactic-change requirement, auto-mkdir, pre-pass reinforcement.

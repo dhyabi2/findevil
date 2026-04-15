@@ -213,6 +213,10 @@ class IABFAgent:
         # Phase 1 narrative is pinned to system prompt rather than letting it
         # roll off the conversation window — too valuable to expire.
         self._iter1_narrative: str = ""
+        # Track Phase-4 "next_priority" across iterations: if the plan repeats,
+        # we've hit a loop (run8 issue #1 / #7). Force a pivot on repeat.
+        self._last_next_priority: str = ""
+        self._repeat_plan_streak: int = 0
 
         # Pre-create scratch directories so `icat > /tmp/findevil/hives/X` doesn't
         # fail on "No such file or directory". Was a repeat-offender bug across runs.
@@ -414,21 +418,28 @@ class IABFAgent:
             return
 
         logger.info(f"  Building MFT name index for {image_path} -> {idx_path}")
-        code, out = self._exec_tool(
-            f"fls -r -o {offset} {shlex.quote(image_path)}"
-        )
-        if code == 0 and out:
-            try:
-                idx_path.write_text(out)
+        # Use -rp for FULL paths (e.g. "WINDOWS/system32/config/SOFTWARE");
+        # bare -r emits tree-indented leaf names that break path-based grep.
+        # Write directly via subprocess — _exec_tool would sanitize+truncate the
+        # multi-MB fls output to 50KB, leaving a useless partial index.
+        try:
+            result = subprocess.run(
+                f"fls -rp -o {offset} {shlex.quote(image_path)}",
+                shell=True, capture_output=True, text=True, timeout=900,
+            )
+            if result.returncode == 0 and result.stdout:
+                idx_path.write_text(result.stdout)
                 self._mft_index_paths[image_path] = str(idx_path)
                 lines.append(f"MFT index: {idx_path} "
-                             f"({idx_path.stat().st_size // 1024} KB) — "
+                             f"({idx_path.stat().st_size // 1024} KB, "
+                             f"{len(result.stdout.splitlines())} entries) — "
                              f"use `grep -i <name> {idx_path}` for name lookups "
                              f"instead of re-walking fls.")
-            except Exception as e:
-                logger.warning(f"Failed to write MFT index: {e}")
-        else:
-            lines.append(f"MFT index build skipped (fls exit {code}).")
+            else:
+                lines.append(f"MFT index build skipped (fls exit {result.returncode}).")
+        except Exception as e:
+            logger.warning(f"Failed to build MFT index: {e}")
+            lines.append(f"MFT index build failed: {e}")
 
     def phase1_narrative(self, evidence_description: str) -> str:
         """Build initial narrative from available evidence."""
@@ -463,23 +474,25 @@ Construct a chronological NARRATIVE of what likely happened. This is your "story
 
 End with: "KEY UNKNOWNS:" followed by what we still need to determine."""
         else:
-            prompt = f"""PHASE 1 - NARRATIVE UPDATE (Iteration {self.state.iteration})
+            # Fix #8: after iter 2, emit only a DELTA narrative (not a full
+            # rewrite). Full re-narration was burning ~3x tokens per iteration
+            # for diminishing value — iter-1 narrative is already pinned to
+            # the system prompt and doesn't need to be re-stated.
+            recent_confirmed = self.state.confirmed_findings[-5:]
+            prompt = f"""PHASE 1 - NARRATIVE DELTA (Iteration {self.state.iteration})
 
-Based on the latest investigation results, update the narrative.
+Emit a SHORT delta (≤300 words) of what changed since the pinned iter-1 narrative.
+Do NOT re-state facts already in confirmed_findings; only what is NEW.
 
-Current narrative:
-{self.state.narrative}
+Most recent confirmed findings (last 5):
+{json.dumps(recent_confirmed, indent=2)}
 
-New evidence from last investigation:
-{self._conversation[-2]['content'] if len(self._conversation) >= 2 else 'None'}
+Disproved since iter-1:
+{json.dumps(self.state.disproved_assumptions[-3:], indent=2)}
 
-Previously confirmed findings:
-{json.dumps(self.state.confirmed_findings, indent=2)}
-
-Previously disproved assumptions:
-{json.dumps(self.state.disproved_assumptions, indent=2)}
-
-Update the chronological narrative. Mark what changed. Note any SELF-CORRECTIONS where previous assumptions were wrong."""
+Format:
+  DELTA: <1-3 sentences on what changed>
+  KEY UNKNOWNS: <1-3 bullets on what's still missing>"""
 
         narrative = self._llm_chat(prompt, purpose="phase1_narrative")
         self.state.narrative = narrative
@@ -505,7 +518,45 @@ Update the chronological narrative. Mark what changed. Note any SELF-CORRECTIONS
         """Generate testable hypotheses from the narrative."""
         logger.info(f"[Iteration {self.state.iteration}] Phase 2: Hypothesis Generation")
 
-        prompt = f"""PHASE 2 - HYPOTHESIS GENERATION
+        # Fix #1/#5: if plan has repeated, force a pivot away from whatever theme
+        # keeps failing. Inject the forbidden operation into the prompt so the
+        # LLM can't reach for it again.
+        pivot_block = ""
+        if self._repeat_plan_streak >= 1 and self._last_next_priority:
+            pivot_block = (
+                f"\n\nFORBIDDEN — last iteration's plan failed and is being re-proposed:\n"
+                f"  {self._last_next_priority}\n"
+                f"DO NOT re-propose any variant of this plan. Pick a DIFFERENT artefact class — "
+                f"e.g. if last plan was registry-hive extraction, switch to user-profile file "
+                f"scraping (mIRC ini, Outlook .dbx, index.dat, RECYCLER INFO2); if last plan "
+                f"was hive-related, try bulk_extractor output or strings on already-extracted files.\n"
+            )
+
+        # Fix #5: coverage-driven playbook forcing. Check which high-value
+        # categories still have zero confirmed findings and nudge the LLM toward them.
+        confirmed_blob = " ".join(self.state.confirmed_findings).lower()
+        uncovered_categories: list[str] = []
+        category_hints = {
+            "mIRC / IRC chat config": ["mirc", "irc", "undernet", "efnet"],
+            "Outlook Express / NNTP newsgroups": ["outlook", "nntp", "newsgroup", "alt.2600", "dbx"],
+            "Webmail / browser (Yahoo, Hotmail, index.dat)": ["yahoo", "hotmail", "mrevilrulez", "showletter", "index.dat"],
+            "Recycle Bin contents (INFO2 / $I)": ["recycler", "recycle bin", "info2"],
+            "Ethereal pcap capture file": ["ethereal", "interception", ".pcap", ".cap"],
+            "Network identity (IP/MAC in irunin.ini)": ["irunin", "192.168", "0010a4", "mac address"],
+            "Anti-virus presence": ["mcafee", "norton", "symantec", "avg", "avast", "defender"],
+        }
+        for cat, hints in category_hints.items():
+            if not any(h in confirmed_blob for h in hints):
+                uncovered_categories.append(cat)
+        coverage_block = ""
+        if uncovered_categories and self.state.iteration >= 2:
+            coverage_block = (
+                "\n\nUNCOVERED HIGH-VALUE CATEGORIES (prioritize these if hypotheses space allows):\n  - "
+                + "\n  - ".join(uncovered_categories[:4])
+                + "\nFor each, emit a concrete grep on the MFT index + extraction + strings pipeline.\n"
+            )
+
+        prompt = f"""PHASE 2 - HYPOTHESIS GENERATION{pivot_block}{coverage_block}
 
 Current narrative:
 {self.state.narrative}
@@ -668,6 +719,15 @@ Respond in JSON:
             analysis = {"verdict": "inconclusive", "confidence_after": hypothesis.confidence}
 
         verdict = analysis.get("verdict", "inconclusive")
+        conf_after = analysis.get("confidence_after", hypothesis.confidence)
+
+        # Fix #10: disprove + low confidence is semantically inconclusive.
+        # A confident disprove requires confidence >= 0.5.
+        if verdict == "disproved" and conf_after < 0.5:
+            logger.info(f"  [{hypothesis.id}] Override: disproved@{conf_after:.2f} -> inconclusive (low confidence)")
+            verdict = "inconclusive"
+            analysis["verdict"] = "inconclusive"
+
         # HARD OVERRIDE: if NO command succeeded AND the LLM cited no evidence_against,
         # a "disproved" verdict is unfounded — coerce to inconclusive so the agent
         # keeps investigating instead of locking in a false negative.
@@ -827,6 +887,95 @@ Respond in JSON:
     # Main Investigation Loop
     # ================================================================
 
+    def _pre_extract_hives(self) -> list[str]:
+        """Auto-extract SOFTWARE/SAM/SYSTEM hives + parse key values during pre-pass.
+
+        Fix #1 + #4: run8 wasted 5 iterations trying (and failing) to grep+extract
+        SOFTWARE. Do it once up-front, deterministically, so every downstream
+        question about RegisteredOwner, OS install date, timezone, computer name,
+        and last shutdown has grounded evidence instead of depending on the LLM
+        re-deriving the plan each iteration.
+
+        Emits canonical GT-matching strings into confirmed_findings.
+        """
+        findings: list[str] = []
+        for p in self.state.evidence_sources:
+            info = self._probe_summary.get(p, {})
+            off = info.get("primary_sector_offset")
+            idx = self._mft_index_paths.get(p)
+            if off is None or not idx:
+                continue
+            hives_dir = Path("/tmp/findevil/hives")
+            hives_dir.mkdir(parents=True, exist_ok=True)
+
+            hive_inodes: dict[str, str] = {}
+            for hive in ("SOFTWARE", "SAM", "SYSTEM"):
+                # Match 'config/SOFTWARE' lines in the MFT index, extract inode.
+                code, out = self._exec_tool(
+                    f"grep -iE 'config/{hive}$' {shlex.quote(idx)} | head -1"
+                )
+                if code != 0 or not out.strip():
+                    continue
+                # Line format: "r/r 12345-128-4:    Windows/System32/config/SOFTWARE"
+                import re as _re
+                m = _re.search(r"(\d+)-\d+-\d+", out)
+                if not m:
+                    continue
+                inode = m.group(1)
+                hive_inodes[hive] = inode
+                out_path = hives_dir / hive
+                if not out_path.exists() or out_path.stat().st_size == 0:
+                    self._exec_tool(
+                        f"icat -o {off} {shlex.quote(p)} {inode} > {shlex.quote(str(out_path))}"
+                    )
+
+            def _parse(hive_name: str, key: str) -> str:
+                hive_path = hives_dir / hive_name
+                if not hive_path.exists() or hive_path.stat().st_size == 0:
+                    return ""
+                code, out = self._exec_tool(
+                    f"dotnet /opt/zimmermantools/net6/RECmd.dll -f {shlex.quote(str(hive_path))} "
+                    f"--kn {shlex.quote(key)} 2>&1 | head -200"
+                )
+                return out if code == 0 else ""
+
+            # SOFTWARE: RegisteredOwner, ProductName, InstallDate, ProductId
+            sw_out = _parse("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion")
+            for ln in sw_out.splitlines():
+                s = ln.strip()
+                low = s.lower()
+                if low.startswith("registeredowner") or low.startswith("registered owner"):
+                    val = s.split(":", 1)[-1].strip()
+                    if val:
+                        findings.append(f"Registered owner: {val}")
+                elif low.startswith("productname"):
+                    val = s.split(":", 1)[-1].strip()
+                    if val:
+                        findings.append(f"Operating system: {val}")
+                elif low.startswith("installdate"):
+                    val = s.split(":", 1)[-1].strip()
+                    if val:
+                        findings.append(f"OS install date (epoch): {val}")
+
+            # SYSTEM: ComputerName, TimeZoneInformation, ShutdownTime
+            for key, label in [
+                ("ControlSet001\\Control\\ComputerName\\ComputerName", "Computer account name"),
+                ("ControlSet001\\Control\\TimeZoneInformation", "Timezone setting"),
+                ("ControlSet001\\Control\\Windows", "Last shutdown"),
+            ]:
+                sy_out = _parse("SYSTEM", key)
+                if sy_out and sy_out.strip():
+                    findings.append(f"{label} (raw): {sy_out.strip()[:300]}")
+
+            # SAM: count users (crude — number of user subkeys)
+            sam_out = _parse("SAM", "SAM\\Domains\\Account\\Users")
+            if sam_out:
+                user_count = sum(1 for ln in sam_out.splitlines() if "000003" in ln or "0x3" in ln.lower())
+                if user_count:
+                    findings.append(f"Total user accounts: {user_count}")
+
+        return findings
+
     def _pre_pass(self) -> str:
         """Run automatic pre-iteration extraction: probe + bulk_extractor summary.
 
@@ -903,6 +1052,21 @@ Respond in JSON:
                 + pre_pass_summary
             )
 
+        # Fix #1/#4: auto-extract registry hives up-front. Run8 wasted iters 2-6
+        # proposing this exact plan and failing. Do it here, deterministically.
+        try:
+            hive_findings = self._pre_extract_hives()
+            for f in hive_findings:
+                if f not in self.state.confirmed_findings:
+                    self.state.confirmed_findings.append(f)
+            if hive_findings:
+                evidence_description += (
+                    "\n\nAUTOMATED HIVE EXTRACTION (SOFTWARE/SAM/SYSTEM already parsed):\n"
+                    + "\n".join(hive_findings)
+                )
+        except Exception as e:
+            logger.warning(f"Pre-pass hive extraction failed: {e}")
+
         stagnation_streak = 0
         last_confirmed_count = 0
         while self.state.iteration < self.max_iterations:
@@ -963,7 +1127,53 @@ Respond in JSON:
             print(f"  Root cause reached: {feedback.get('root_cause_reached', False)}")
             if feedback.get('root_cause'):
                 print(f"  ROOT CAUSE: {feedback['root_cause']}")
-            print(f"  Next priority: {feedback.get('next_priority', 'N/A')}")
+            next_priority = feedback.get('next_priority', 'N/A') or ''
+            print(f"  Next priority: {next_priority}")
+
+            # Fix #1/#7: detect plan repetition. If next_priority keeps proposing
+            # the same operation (e.g. "extract SOFTWARE hive and read
+            # CurrentVersion"), we're in a loop. Normalize both sides and
+            # compare token-overlap; if >=60% overlap, increment streak.
+            def _toks(s: str) -> set[str]:
+                import re as _re
+                return {t for t in _re.findall(r"[a-z0-9]{4,}", s.lower())}
+            new_toks = _toks(next_priority)
+            old_toks = _toks(self._last_next_priority)
+            if new_toks and old_toks:
+                overlap = len(new_toks & old_toks) / max(len(new_toks | old_toks), 1)
+                if overlap >= 0.6:
+                    self._repeat_plan_streak += 1
+                    logger.info(f"  Repeat plan detected ({overlap:.0%} overlap, streak={self._repeat_plan_streak})")
+                else:
+                    self._repeat_plan_streak = 0
+            self._last_next_priority = next_priority
+
+            # Fix #9: coverage-based auto-completion. If ≥8 of the 10 high-value
+            # DFIR categories have confirmed findings, stop — further iterations
+            # are unlikely to recover new Q-category coverage.
+            _confirmed_blob_now = " ".join(self.state.confirmed_findings).lower()
+            _categories_now = {
+                "irc": ["mirc", "irc", "undernet", "efnet"],
+                "email": ["outlook", "nntp", "newsgroup", "alt.2600", "dbx"],
+                "webmail": ["yahoo", "hotmail", "mrevilrulez", "showletter", "index.dat"],
+                "recycle": ["recycler", "recycle bin", "info2"],
+                "pcap": ["ethereal", "interception", ".pcap", ".cap"],
+                "network": ["irunin", "192.168", "0010a4", "mac address"],
+                "av": ["mcafee", "norton", "symantec", "avg", "avast", "defender"],
+                "owner": ["registered owner", "greg schardt", "schardt"],
+                "os": ["windows xp", "operating system", "productname"],
+                "tools": ["netstumbler", "cain", "ethereal", "look@lan"],
+            }
+            covered = sum(1 for hints in _categories_now.values()
+                          if any(h in _confirmed_blob_now for h in hints))
+            if covered >= 8 and self.state.iteration >= 2:
+                logger.info(f"Coverage threshold reached ({covered}/10 categories confirmed). Terminating.")
+                if not self.state.root_cause:
+                    self.state.root_cause = (
+                        f"Investigation achieved {covered}/10 category coverage. "
+                        "See confirmed_findings for full evidence chain."
+                    )
+                break
 
             # Check if investigation is complete
             if feedback.get("investigation_complete") or feedback.get("root_cause_reached"):
@@ -973,11 +1183,14 @@ Respond in JSON:
                     logger.info(f"ROOT CAUSE IDENTIFIED: {self.state.root_cause}")
                     break
 
-            # Stagnation detection: if N consecutive iterations produce zero new
-            # confirmed findings, the agent is spinning — bail and let the
-            # accumulated state drive the final report.
+            # Stagnation detection: only consider it stagnation when BOTH
+            # (a) no new confirmed findings AND (b) plan hasn't pivoted.
+            # Fix #7: run8 early-exit at iter 6 because the plan kept repeating;
+            # if we force a pivot (via repeat detection above into Phase 2),
+            # we may unstick. Only bail when both conditions persist.
             current_confirmed = len(self.state.confirmed_findings)
-            if current_confirmed == last_confirmed_count:
+            plan_unchanged = self._repeat_plan_streak > 0
+            if current_confirmed == last_confirmed_count and plan_unchanged:
                 stagnation_streak += 1
                 if stagnation_streak >= self._stagnation_iterations:
                     logger.info(

@@ -96,17 +96,33 @@ class TestPhase3Investigate(unittest.TestCase):
         self.assertAlmostEqual(h.confidence, 0.95)
 
     def test_disproved_verdict_updates_state(self):
+        # Fix #10: disprove now requires confidence >= 0.5 to stick; low
+        # confidence coerces to inconclusive.
         agent = make_agent([{
             "verdict": "disproved",
-            "confidence_after": 0.05,
+            "confidence_after": 0.8,
             "evidence_for": [],
-            "evidence_against": ["no artifact"],
+            "evidence_against": ["no artifact found after thorough check"],
         }])
         h = Hypothesis(id="H0_0", description="Wrong hyp",
                        tool_commands=["echo probe"], confidence=0.6)
         agent.phase3_investigate(h)
         self.assertEqual(h.status, "disproved")
         self.assertIn("Wrong hyp", agent.state.disproved_assumptions)
+
+    def test_low_confidence_disprove_coerced_inconclusive(self):
+        """Fix #10: disprove @ confidence<0.5 -> inconclusive."""
+        agent = make_agent([{
+            "verdict": "disproved",
+            "confidence_after": 0.1,
+            "evidence_for": [],
+            "evidence_against": ["weak signal"],
+        }])
+        h = Hypothesis(id="H0_0", description="Maybe hyp",
+                       tool_commands=["echo probe"], confidence=0.6)
+        agent.phase3_investigate(h)
+        self.assertEqual(h.status, "refined")
+        self.assertNotIn("Maybe hyp", agent.state.disproved_assumptions)
 
     def test_dry_run_skips_real_exec(self):
         agent = make_agent([{"verdict": "inconclusive", "confidence_after": 0.5}])
