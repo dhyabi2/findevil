@@ -176,6 +176,8 @@ class IABFAgent:
         self._max_conversation_turns = 8  # user+assistant pairs retained
         self._probe_summary: dict[str, dict] = {}
         self._system_prompt: str = SYSTEM_PROMPT_TEMPLATE
+        self._phase3_parallelism = self.config.get("agent", {}).get("phase3_parallelism", 3)
+        self._mft_index_paths: dict[str, str] = {}  # evidence_path -> cached mft index file
 
     def _exec_tool(self, command: str) -> tuple[int, str]:
         """Execute a forensic tool command through guardrails."""
@@ -318,7 +320,50 @@ class IABFAgent:
                         break
             else:
                 lines.append(f"mmls failed (exit {code}) — image may not be a raw disk")
+
+            # Cache a full filesystem name index (fls -r) once per image.
+            # Used to replace repeated `fls -r | grep <name>` scans with one
+            # `grep <name> <cached_index>` — saves minutes across iterations.
+            self._build_mft_index(p, info, lines)
         return "\n".join(lines)
+
+    def _build_mft_index(self, image_path: str, info: dict, lines: list[str]) -> None:
+        """Build and cache a filesystem name index (fls -r) for quick grep lookups.
+
+        Skipped if the filesystem/offset wasn't resolved, or if a cached index
+        with matching sha256 already exists on disk.
+        """
+        offset = info.get("primary_sector_offset")
+        sha = info.get("sha256")
+        if offset is None or not sha:
+            return
+        cache_dir = Path("/tmp/findevil")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        idx_path = cache_dir / f"mft_index_{sha[:16]}.txt"
+
+        if idx_path.exists() and idx_path.stat().st_size > 0:
+            self._mft_index_paths[image_path] = str(idx_path)
+            lines.append(f"MFT index (cached): {idx_path} "
+                         f"({idx_path.stat().st_size // 1024} KB) — "
+                         f"use `grep -i <name> {idx_path}` for name lookups instead of re-walking fls.")
+            return
+
+        logger.info(f"  Building MFT name index for {image_path} -> {idx_path}")
+        code, out = self._exec_tool(
+            f"fls -r -o {offset} {shlex.quote(image_path)}"
+        )
+        if code == 0 and out:
+            try:
+                idx_path.write_text(out)
+                self._mft_index_paths[image_path] = str(idx_path)
+                lines.append(f"MFT index: {idx_path} "
+                             f"({idx_path.stat().st_size // 1024} KB) — "
+                             f"use `grep -i <name> {idx_path}` for name lookups "
+                             f"instead of re-walking fls.")
+            except Exception as e:
+                logger.warning(f"Failed to write MFT index: {e}")
+        else:
+            lines.append(f"MFT index build skipped (fls exit {code}).")
 
     def phase1_narrative(self, evidence_description: str) -> str:
         """Build initial narrative from available evidence."""
@@ -740,22 +785,34 @@ Respond in JSON:
             for h in new_hypotheses:
                 print(f"  [{h.id}] {h.description} (confidence: {h.confidence})")
 
-            # Phase 3: Investigate each hypothesis INDEPENDENTLY
+            # Phase 3: Investigate each hypothesis INDEPENDENTLY — run in parallel.
+            # IABF isolation principle: each hypothesis is tested on its own evidence
+            # with no shared state, so parallel execution preserves methodology.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             iteration_results = []
-            for hypothesis in new_hypotheses:
-                if hypothesis.confidence < self.discard_threshold:
-                    logger.info(f"  Skipping {hypothesis.id} - below confidence threshold")
-                    hypothesis.status = "disproved"
-                    continue
+            active = [h for h in new_hypotheses if h.confidence >= self.discard_threshold]
+            for h in new_hypotheses:
+                if h.confidence < self.discard_threshold:
+                    logger.info(f"  Skipping {h.id} - below confidence threshold")
+                    h.status = "disproved"
 
-                result = self.phase3_investigate(hypothesis)
-                iteration_results.append({
-                    "hypothesis": hypothesis.description,
-                    "result": result,
-                })
-
-                print(f"\n  [{hypothesis.id}] Verdict: {result.get('verdict', 'unknown')} "
-                      f"(confidence: {result.get('confidence_after', '?')})")
+            if active:
+                max_workers = min(len(active), self._phase3_parallelism)
+                with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="phase3") as pool:
+                    fut_to_hyp = {pool.submit(self.phase3_investigate, h): h for h in active}
+                    for fut in as_completed(fut_to_hyp):
+                        h = fut_to_hyp[fut]
+                        try:
+                            result = fut.result()
+                        except Exception as e:
+                            logger.warning(f"  [{h.id}] phase3 failed: {e}")
+                            result = {"verdict": "inconclusive", "confidence_after": h.confidence}
+                        iteration_results.append({
+                            "hypothesis": h.description,
+                            "result": result,
+                        })
+                        print(f"\n  [{h.id}] Verdict: {result.get('verdict', 'unknown')} "
+                              f"(confidence: {result.get('confidence_after', '?')})")
 
             # Phase 4: Feedback
             feedback_raw = self.phase4_feedback(iteration_results)

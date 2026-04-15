@@ -6,6 +6,7 @@ with timestamps and token usage for competition submission.
 """
 
 import json
+import threading
 import time
 import uuid
 import logging
@@ -76,32 +77,35 @@ class AuditTrail:
         self._iterations: list[IterationRecord] = []
         self._llm_calls: list[dict] = []
         self._events: list[dict] = []
+        self._lock = threading.RLock()
 
         # JSONL file for streaming logs
         self._log_file = self.log_dir / f"session_{self.session_id}.jsonl"
 
     def _emit(self, event_type: str, data: dict):
-        """Write a structured event to the JSONL log."""
+        """Write a structured event to the JSONL log. Thread-safe."""
         event = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "session_id": self.session_id,
             "event_type": event_type,
             **data,
         }
-        self._events.append(event)
-        with open(self._log_file, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        with self._lock:
+            self._events.append(event)
+            with open(self._log_file, "a") as f:
+                f.write(json.dumps(event) + "\n")
 
     def log_tool_start(self, tool_name: str, command: str, args: list[str]) -> str:
-        """Log the start of a tool execution. Returns execution ID."""
-        exec_id = f"tool_{len(self._tool_executions):04d}"
-        record = ToolExecution(
-            tool_name=tool_name,
-            command=command,
-            args=args,
-            start_time=datetime.now(timezone.utc).isoformat(),
-        )
-        self._tool_executions.append(record)
+        """Log the start of a tool execution. Returns execution ID. Thread-safe."""
+        with self._lock:
+            exec_id = f"tool_{len(self._tool_executions):04d}"
+            record = ToolExecution(
+                tool_name=tool_name,
+                command=command,
+                args=args,
+                start_time=datetime.now(timezone.utc).isoformat(),
+            )
+            self._tool_executions.append(record)
         self._emit("tool_start", {
             "exec_id": exec_id,
             "tool_name": tool_name,
@@ -112,7 +116,8 @@ class AuditTrail:
     def log_tool_end(self, exec_id: str, exit_code: int, output: str, error: str = ""):
         """Log the completion of a tool execution."""
         idx = int(exec_id.split("_")[1])
-        record = self._tool_executions[idx]
+        with self._lock:
+            record = self._tool_executions[idx]
         record.end_time = datetime.now(timezone.utc).isoformat()
         record.exit_code = exit_code
         record.output_size_bytes = len(output.encode())
@@ -132,13 +137,15 @@ class AuditTrail:
 
     def log_hypothesis(self, hypothesis: HypothesisRecord):
         """Log a hypothesis creation or update."""
-        self._hypotheses.append(hypothesis)
+        with self._lock:
+            self._hypotheses.append(hypothesis)
         self._emit("hypothesis", asdict(hypothesis))
 
     def log_iteration(self, iteration: IterationRecord):
         """Log a complete IABF iteration."""
         iteration.timestamp = datetime.now(timezone.utc).isoformat()
-        self._iterations.append(iteration)
+        with self._lock:
+            self._iterations.append(iteration)
         self._emit("iteration", asdict(iteration))
 
     def log_llm_call(self, model: str, tokens: dict, latency_ms: float, purpose: str):
@@ -149,7 +156,8 @@ class AuditTrail:
             "latency_ms": latency_ms,
             "purpose": purpose,
         }
-        self._llm_calls.append(record)
+        with self._lock:
+            self._llm_calls.append(record)
         self._emit("llm_call", record)
 
     def log_narrative(self, narrative: str, iteration: int):

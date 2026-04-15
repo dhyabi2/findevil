@@ -121,7 +121,7 @@ class LLMClient:
 
         start = time.monotonic()
 
-        def _post_with_retry(pl: dict, max_attempts: int = 5) -> httpx.Response:
+        def _post_with_retry(pl: dict, max_attempts: int = 3) -> httpx.Response:
             """POST with exponential backoff on transient errors (DNS, timeout, 5xx)."""
             last_exc: Exception | None = None
             for attempt in range(max_attempts):
@@ -175,8 +175,14 @@ class LLMClient:
         messages: list[dict],
         system: str | None = None,
         model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> dict:
-        """Send a chat request expecting JSON output. Parse and return dict."""
+        """Send a chat request expecting JSON output. Parse and return dict.
+
+        JSON phases (hypotheses, analysis, feedback) produce small structured
+        responses; defaults bias toward speed (lower max_tokens, temperature 0).
+        """
         if system:
             system += "\n\nYou MUST respond with valid JSON only. No markdown, no explanation."
         else:
@@ -186,6 +192,8 @@ class LLMClient:
             messages=messages,
             system=system,
             model=model,
+            max_tokens=max_tokens if max_tokens is not None else 1024,
+            temperature=temperature if temperature is not None else 0.0,
             response_format={"type": "json_object"},
         )
 
