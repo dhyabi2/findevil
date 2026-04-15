@@ -77,21 +77,38 @@ METHODOLOGY (IABF):
 3. INVESTIGATE: Run the plan. If tool output is empty or errors, the hypothesis is INCONCLUSIVE, not disproved.
 4. FEEDBACK: Update narrative; keep confirmed facts; re-plan next iteration.
 
+FAST NAME LOOKUPS — ALWAYS DO THIS FIRST, NOT `fls -r | grep`:
+  A cached MFT name index exists at /tmp/findevil/mft_index_<sha>.txt (see EVIDENCE block).
+  Re-walking the filesystem with `fls -r` takes minutes each time. The cache is ONE grep:
+      grep -iE 'SOFTWARE|SYSTEM|SAM|NTUSER' /tmp/findevil/mft_index_*.txt
+      grep -iE 'NetStumbler|Cain|Ethereal|Kismet|Wireshark|Look@LAN' /tmp/findevil/mft_index_*.txt
+      grep -iE 'irunin\\.ini|RECYCLER|\\.pcap|\\.cap|Outlook|mIRC' /tmp/findevil/mft_index_*.txt
+  The index lines look like `r/r 12345-128-1:    Windows/System32/config/SOFTWARE` — the
+  number before the first `-` is the INODE you then feed to `icat`.
+
 WINDOWS DEAD-DISK PLAYBOOK (priority order — use this, don't guess random tools):
-  (a) System identity:
-        icat -o <sec> <img> <inode_of_SOFTWARE_hive>  > /tmp/findevil/hives/SOFTWARE
+  (a) System identity — 3 concrete commands:
+        # 1. Find the SOFTWARE hive inode via cached index (fast):
+        grep -i 'config/SOFTWARE$' /tmp/findevil/mft_index_*.txt
+        # 2. Extract it to scratch (the directory /tmp/findevil/hives/ is pre-created for you):
+        icat -o {primary_offset} {primary_image} <INODE> > /tmp/findevil/hives/SOFTWARE
+        # 3. Parse with RECmd:
         dotnet /opt/zimmermantools/net6/RECmd.dll -f /tmp/findevil/hives/SOFTWARE --kn "Microsoft\\Windows NT\\CurrentVersion"
         → RegisteredOwner, ProductName, InstallDate, TimeZone
   (b) User accounts:
-        icat SAM hive → RECmd with --kn "SAM\\Domains\\Account\\Users"
+        grep -i 'config/SAM$' /tmp/findevil/mft_index_*.txt   → inode
+        icat -o {primary_offset} {primary_image} <SAM_INODE> > /tmp/findevil/hives/SAM
+        dotnet /opt/zimmermantools/net6/RECmd.dll -f /tmp/findevil/hives/SAM --kn "SAM\\Domains\\Account\\Users"
   (c) Installed software (hacking tools):
-        fls -r -o <sec> <img> | grep -iE 'Program Files|Uninstall'
+        grep -iE 'Program Files/[^/]+$' /tmp/findevil/mft_index_*.txt
         RECmd on SOFTWARE → "Microsoft\\Windows\\CurrentVersion\\Uninstall"
   (d) Network identity (IP/MAC):
         RECmd on SYSTEM → "ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces"
-        bulk_extractor -o /tmp/findevil/be <img>   → ip.txt, ether.txt, email.txt
-  (e) Artefact sweep:
-        strings extracted user files for IRC/email/newsgroup keywords
+        # bulk_extractor already ran as a pre-pass — see PRE-PASS ARTEFACTS in evidence
+        grep -i 'irunin\\.ini' /tmp/findevil/mft_index_*.txt  → extract + strings for IP/MAC
+  (e) Artefact sweep (user files for IRC/email/newsgroup/yahoo):
+        grep -iE 'Outlook|Identities|mIRC|ini$|\\.htm$' /tmp/findevil/mft_index_*.txt
+        → extract candidate file(s) via icat → strings on the extracted bytes
   (f) Timeline if needed:
         log2timeline.py, then psort.py
 
@@ -173,14 +190,33 @@ class IABFAgent:
         self.discard_threshold = self.config.get("agent", {}).get("discard_threshold", 0.15)
         self.dry_run = dry_run
         self._conversation: list[dict] = []
-        self._max_conversation_turns = 8  # user+assistant pairs retained
+        self._max_conversation_turns = 12  # user+assistant pairs retained
         self._probe_summary: dict[str, dict] = {}
         self._system_prompt: str = SYSTEM_PROMPT_TEMPLATE
         self._phase3_parallelism = self.config.get("agent", {}).get("phase3_parallelism", 3)
         self._mft_index_paths: dict[str, str] = {}  # evidence_path -> cached mft index file
+        self._stagnation_iterations = self.config.get("agent", {}).get("stagnation_iterations", 2)
+
+        # Pre-create scratch directories so `icat > /tmp/findevil/hives/X` doesn't
+        # fail on "No such file or directory". Was a repeat-offender bug across runs.
+        for sub in ("hives", "exports", "be", "strings", "ewf"):
+            Path("/tmp/findevil") .joinpath(sub).mkdir(parents=True, exist_ok=True)
 
     def _exec_tool(self, command: str) -> tuple[int, str]:
         """Execute a forensic tool command through guardrails."""
+        # Defensive: if the command redirects to a file under /tmp/findevil/<subdir>/
+        # that doesn't exist yet, create the parent directory. The LLM keeps
+        # emitting `icat ... > /tmp/findevil/hives/SOFTWARE` before ensuring
+        # /tmp/findevil/hives/ exists — resulting in "No such file or directory"
+        # and a wasted hypothesis. Only creates dirs inside /tmp/findevil/.
+        import re as _re
+        for redirect in _re.finditer(r">>?\s*(/tmp/findevil/[A-Za-z0-9_./\-]+)", command):
+            target = Path(redirect.group(1))
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
         violation = self.guardrails.validate_command(command)
         if violation:
             self.audit.log_guardrail_violation(violation.detail, command)
@@ -442,11 +478,25 @@ Already tested hypotheses:
     'confidence': h.confidence
 } for h in self.state.hypotheses], indent=2)}
 
-Generate 1-3 NEW testable hypotheses. For each:
-1. A specific, falsifiable assumption
+Generate 1-3 NEW testable hypotheses. EACH hypothesis MUST either:
+  (a) drill deeper into an already-CONFIRMED finding (extract specific artefacts, resolve
+      actual names/values, follow the evidence chain further) — NOT re-describe what is
+      already confirmed, and
+  (b) probe a gap that none of the already-tested hypotheses attempted — do NOT repeat
+      a theme (owner, tools, network, IRC) that was already inconclusive; change tactic
+      (e.g. switch from registry-query to bulk_extractor evidence, or from MFT grep to
+      strings-on-extracted-file).
+
+AVOID generating hypotheses whose description closely paraphrases anything in
+"Already tested hypotheses" above — that wastes an iteration.
+
+For each hypothesis provide:
+1. A specific, falsifiable assumption (name a concrete value you expect — e.g. "the
+   RegisteredOwner value in SOFTWARE hive equals 'Greg Schardt'").
 2. The MITRE ATT&CK technique it maps to (ID + name)
 3. Your confidence level (0.0-1.0)
-4. The EXACT SIFT forensic tool command(s) needed to test it
+4. The EXACT SIFT forensic tool command(s) needed to test it — prefer the cached MFT
+   index (`grep -i <pattern> /tmp/findevil/mft_index_*.txt`) over `fls -r`.
 5. What result would CONFIRM vs DISPROVE it
 
 HARD CONSTRAINTS for tool_commands (any violation = command BLOCKED, iteration wasted):
@@ -597,7 +647,18 @@ Respond in JSON:
 
         if verdict == "confirmed":
             hypothesis.status = "confirmed"
-            self.state.confirmed_findings.append(hypothesis.description)
+            # Attach concrete artefacts (evidence_for items) alongside the
+            # description so downstream prompts see actual values — not just
+            # paraphrases of the hypothesis. Prevents ACCURACY.md scoring from
+            # missing matches that only appeared in evidence_for.
+            ev = hypothesis.evidence_for or []
+            if ev:
+                ev_text = "; ".join(str(e) for e in ev if e)[:400]
+                self.state.confirmed_findings.append(
+                    f"{hypothesis.description} — {ev_text}"
+                )
+            else:
+                self.state.confirmed_findings.append(hypothesis.description)
         elif verdict == "disproved":
             hypothesis.status = "disproved"
             self.state.disproved_assumptions.append(hypothesis.description)
@@ -653,8 +714,14 @@ Perform the feedback analysis:
 1. How do these results change the narrative?
 2. What probabilities need adjustment?
 3. Have we reached the ROOT CAUSE? (Set root_cause if yes)
-4. If not, what is the SINGLE most important thing to investigate next?
+4. If not, what is the SINGLE most important thing to investigate next? Name the
+   specific artefact/file/registry-key/value the next iteration must extract,
+   not a generic theme. BAD: "investigate network identity". GOOD: "extract the
+   SYSTEM hive and read Tcpip\\Parameters\\Interfaces to recover the static IP."
 5. Note any SELF-CORRECTIONS - where our previous understanding was wrong.
+6. If this iteration produced ONLY inconclusive results, propose a TACTIC CHANGE
+   for next iteration (different tool family, different artefact class) — do NOT
+   recommend re-running the same approach that just failed.
 
 Respond in JSON:
 {{
@@ -764,6 +831,8 @@ Respond in JSON:
                 + pre_pass_summary
             )
 
+        stagnation_streak = 0
+        last_confirmed_count = 0
         while self.state.iteration < self.max_iterations:
             self.state.iteration += 1
             logger.info(f"\n{'='*60}")
@@ -831,6 +900,28 @@ Respond in JSON:
                     self.state.root_cause = feedback.get("root_cause", "")
                     logger.info(f"ROOT CAUSE IDENTIFIED: {self.state.root_cause}")
                     break
+
+            # Stagnation detection: if N consecutive iterations produce zero new
+            # confirmed findings, the agent is spinning — bail and let the
+            # accumulated state drive the final report.
+            current_confirmed = len(self.state.confirmed_findings)
+            if current_confirmed == last_confirmed_count:
+                stagnation_streak += 1
+                if stagnation_streak >= self._stagnation_iterations:
+                    logger.info(
+                        f"Stagnation detected ({stagnation_streak} iterations with no new "
+                        f"confirmed findings). Terminating early at iteration "
+                        f"{self.state.iteration}/{self.max_iterations}."
+                    )
+                    if not self.state.root_cause:
+                        self.state.root_cause = (
+                            "Investigation terminated on stagnation. See narrative "
+                            "and confirmed_findings for partial results."
+                        )
+                    break
+            else:
+                stagnation_streak = 0
+                last_confirmed_count = current_confirmed
 
         # Generate final report
         report = self._generate_report()

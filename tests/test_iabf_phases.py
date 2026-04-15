@@ -91,7 +91,8 @@ class TestPhase3Investigate(unittest.TestCase):
         result = agent.phase3_investigate(h)
         self.assertEqual(result["verdict"], "confirmed")
         self.assertEqual(h.status, "confirmed")
-        self.assertIn("Test hyp", agent.state.confirmed_findings)
+        self.assertTrue(any("Test hyp" in c for c in agent.state.confirmed_findings))
+        self.assertTrue(any("artifact X" in c for c in agent.state.confirmed_findings))
         self.assertAlmostEqual(h.confidence, 0.95)
 
     def test_disproved_verdict_updates_state(self):
