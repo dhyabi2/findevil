@@ -1,0 +1,123 @@
+{
+  "_comment": "FIND EVIL! demo OBS scene collection. Import via OBS → Scene Collection → Import. Edit absolute paths in 'file' fields to match your machine before recording.",
+  "current_scene": "1_Intro",
+  "current_program_scene": "1_Intro",
+  "name": "FINDEVIL_DemoKit",
+  "scene_order": [
+    {"name": "1_Intro"},
+    {"name": "2_ComparisonTable"},
+    {"name": "3_Terminal"},
+    {"name": "4_BPMN"},
+    {"name": "5_Close"}
+  ],
+  "sources": [
+    {
+      "name": "1_Intro",
+      "id": "scene",
+      "settings": {
+        "items": [
+          {"name": "Webcam_Cam",  "pos": {"x": 1450, "y": 50},  "scale": {"x": 0.30, "y": 0.30}},
+          {"name": "Title_Slide", "pos": {"x": 0,    "y": 0},   "scale": {"x": 1.00, "y": 1.00}},
+          {"name": "Mic_Audio",   "pos": {"x": 0,    "y": 0},   "scale": {"x": 1.00, "y": 1.00}}
+        ]
+      }
+    },
+    {
+      "name": "2_ComparisonTable",
+      "id": "scene",
+      "settings": {
+        "items": [
+          {"name": "Browser_Comparison", "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}},
+          {"name": "Webcam_Cam",         "pos": {"x": 1600, "y": 880}, "scale": {"x": 0.18, "y": 0.18}},
+          {"name": "Mic_Audio",          "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}}
+        ]
+      }
+    },
+    {
+      "name": "3_Terminal",
+      "id": "scene",
+      "settings": {
+        "items": [
+          {"name": "Terminal_Capture", "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}},
+          {"name": "Webcam_Cam",       "pos": {"x": 1600, "y": 880}, "scale": {"x": 0.18, "y": 0.18}},
+          {"name": "Mic_Audio",        "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}}
+        ]
+      }
+    },
+    {
+      "name": "4_BPMN",
+      "id": "scene",
+      "settings": {
+        "items": [
+          {"name": "Browser_BPMN", "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}},
+          {"name": "Webcam_Cam",   "pos": {"x": 1600, "y": 880}, "scale": {"x": 0.18, "y": 0.18}},
+          {"name": "Mic_Audio",    "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}}
+        ]
+      }
+    },
+    {
+      "name": "5_Close",
+      "id": "scene",
+      "settings": {
+        "items": [
+          {"name": "Close_Slide", "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}},
+          {"name": "Webcam_Cam",  "pos": {"x": 1450, "y": 50}, "scale": {"x": 0.30, "y": 0.30}},
+          {"name": "Mic_Audio",   "pos": {"x": 0, "y": 0}, "scale": {"x": 1.00, "y": 1.00}}
+        ]
+      }
+    },
+    {
+      "name": "Webcam_Cam",
+      "id": "v4l2_input",
+      "_comment": "Linux V4L2 webcam. On Windows use 'dshow_input', on Mac 'av_capture_input_v2'.",
+      "settings": {"device_id": "/dev/video0", "input_format": "yuyv422", "resolution": "1280x720"}
+    },
+    {
+      "name": "Mic_Audio",
+      "id": "pulse_input_capture",
+      "_comment": "Linux PulseAudio. On Windows: 'wasapi_input_capture'. On Mac: 'coreaudio_input_capture'.",
+      "settings": {"device_id": "default"}
+    },
+    {
+      "name": "Title_Slide",
+      "id": "image_source",
+      "settings": {"file": "/home/sansforensics/findevil/docs/video/slide_title.png"}
+    },
+    {
+      "name": "Close_Slide",
+      "id": "image_source",
+      "settings": {"file": "/home/sansforensics/findevil/docs/video/slide_close.png"}
+    },
+    {
+      "name": "Terminal_Capture",
+      "id": "xcomposite_input",
+      "_comment": "Linux: capture a specific X window (use the terminal you'll run demo.sh in). Windows: 'window_capture'. Mac: 'screen_capture' or 'window_capture'.",
+      "settings": {"capture_window": "Terminal"}
+    },
+    {
+      "name": "Browser_Comparison",
+      "id": "xcomposite_input",
+      "_comment": "Capture browser tab pinned to README.md anchor #legacy-dfir-tools-vs-find-evil-iabf-agent--capability-comparison",
+      "settings": {"capture_window": "Mozilla Firefox"}
+    },
+    {
+      "name": "Browser_BPMN",
+      "id": "xcomposite_input",
+      "_comment": "Capture browser tab on https://demo.bpmn.io/ with findevil_iabf_workflow.bpmn loaded.",
+      "settings": {"capture_window": "Mozilla Firefox"}
+    }
+  ],
+  "modules": {
+    "output": {
+      "mode": "Advanced",
+      "recording": {
+        "format": "mp4",
+        "encoder": "x264",
+        "bitrate": 6000,
+        "fps": 30,
+        "resolution": "1920x1080",
+        "audio_bitrate": 192
+      }
+    }
+  }
+}
