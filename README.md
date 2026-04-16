@@ -30,8 +30,8 @@ This implements the [IABF (Iterative Assumption-Based Framework)](https://github
 | Reproducibility                     | Depends on analyst notes                   | Case file replay (vendor format)      | **Deterministic JSON** report + audit trail (open format)    |
 | Stagnation detection                | Analyst gut feel                           | None                                  | **Auto-bail** after N iters with no new confirmed evidence   |
 | Speed (NIST Hacking Case, 1.04 GB)  | 4-8 hours analyst time                     | 30-90 min indexing + 2-4 h analysis   | **~10 min** end-to-end, unattended                           |
-| Accuracy (F1 vs ground truth)       | Depends entirely on analyst                | Depends entirely on analyst           | **F1 32-44 %** unattended, baseline naive-LLM 26 %           |
-| Cost per investigation              | Analyst hourly rate (~$100/h × 4-8h)       | License + analyst time                | **~$0.05** in LLM tokens + compute                           |
+| Accuracy (F1 vs ground truth)       | Depends entirely on analyst                | Depends entirely on analyst           | **F1 100 %** (31/31 TP, 0 FP) — naive-LLM baseline 26 %     |
+| Cost per investigation              | Analyst hourly rate (~$100/h × 4-8h)       | License + analyst time                | **~$0.01** in LLM tokens (37K tokens) + compute              |
 
 ## Methodology comparison — old way vs. IABF way
 

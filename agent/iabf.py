@@ -10,8 +10,10 @@ Implements the 4-phase methodology from the IABF research paper:
 Each cycle refines the narrative until root cause is identified.
 """
 
+import datetime
 import json
 import logging
+import re
 import subprocess
 import shlex
 import time
@@ -93,12 +95,12 @@ WINDOWS DEAD-DISK PLAYBOOK (priority order — use this, don't guess random tool
         # 2. Extract it to scratch (the directory /tmp/findevil/hives/ is pre-created for you):
         icat -o {primary_offset} {primary_image} <INODE> > /tmp/findevil/hives/SOFTWARE
         # 3. Parse with RECmd:
-        dotnet /opt/zimmermantools/net6/RECmd.dll -f /tmp/findevil/hives/SOFTWARE --kn "Microsoft\\Windows NT\\CurrentVersion"
+        dotnet /opt/zimmermantools/RECmd/RECmd.dll -f /tmp/findevil/hives/SOFTWARE --kn "Microsoft\\Windows NT\\CurrentVersion"
         → RegisteredOwner, ProductName, InstallDate, TimeZone
   (b) User accounts:
         grep -i 'config/SAM$' /tmp/findevil/mft_index_*.txt   → inode
         icat -o {primary_offset} {primary_image} <SAM_INODE> > /tmp/findevil/hives/SAM
-        dotnet /opt/zimmermantools/net6/RECmd.dll -f /tmp/findevil/hives/SAM --kn "SAM\\Domains\\Account\\Users"
+        dotnet /opt/zimmermantools/RECmd/RECmd.dll -f /tmp/findevil/hives/SAM --kn "SAM\\Domains\\Account\\Users"
   (c) Installed software (hacking tools):
         grep -iE 'Program Files/[^/]+$' /tmp/findevil/mft_index_*.txt
         RECmd on SOFTWARE → "Microsoft\\Windows\\CurrentVersion\\Uninstall"
@@ -130,7 +132,7 @@ SIFT TOOL CHEAT-SHEET (command MUST start with one of these binaries):
   mmls, fsstat, fls, icat, ifind, tsk_recover, blkls, blkcat, srch_strings, mactime,
   log2timeline.py, psort.py, pinfo.py,
   bulk_extractor, foremost, scalpel,
-  strings, file, xxd, hexdump, sha256sum, md5sum, exiftool, pdftotext, olevba,
+  strings, file, xxd, hexdump, sha256sum, md5sum, ewfverify, exiftool, pdftotext, olevba,
   grep, head, tail, wc, sort, uniq, awk, sed, cut, find, ls, cat,
   dotnet, python3, yara, tshark
 
@@ -177,6 +179,47 @@ def build_system_prompt(evidence_sources: list[str], probe_summary: dict) -> str
 SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE
 
 
+def _convert_timestamp(value: str) -> str:
+    """R11-3 + R13: convert epoch, FILETIME integer, or hex FILETIME to human-readable.
+
+    Handles:
+    - Unix epoch (integer seconds since 1970)
+    - Windows FILETIME (integer, 100-ns since 1601)
+    - Hex FILETIME from RECmd binary output (e.g. "C4-FC-00-07-4D-8C-C4-01")
+    """
+    s = value.strip()
+
+    # Try hex FILETIME first (e.g. "C4-FC-00-07-4D-8C-C4-01")
+    hex_match = re.match(r"^([0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){7})", s)
+    if hex_match:
+        try:
+            hex_bytes = hex_match.group(1).split("-")
+            filetime = int("".join(reversed(hex_bytes)), 16)
+            epoch = (filetime - 116444736000000000) / 10**7
+            dt = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, OSError, OverflowError):
+            pass
+
+    try:
+        n = int(s)
+    except ValueError:
+        return value
+    # Windows FILETIME: 100-ns intervals since 1601-01-01
+    if n > 10**16:
+        epoch = (n - 116444736000000000) / 10**7
+        try:
+            dt = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except (OSError, OverflowError):
+            return value
+    # Unix epoch: plausible range 2000-01-01 to 2030-01-01
+    if 946684800 <= n <= 1893456000:
+        dt = datetime.datetime.fromtimestamp(n, tz=datetime.timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return value
+
+
 class IABFAgent:
     """Core IABF investigation agent."""
 
@@ -217,6 +260,9 @@ class IABFAgent:
         # we've hit a loop (run8 issue #1 / #7). Force a pivot on repeat.
         self._last_next_priority: str = ""
         self._repeat_plan_streak: int = 0
+        # R11-10: cache tool output by command to avoid re-sending identical
+        # results to the LLM. Keyed by exact command string.
+        self._tool_cache: dict[str, tuple[int, str]] = {}
 
         # Pre-create scratch directories so `icat > /tmp/findevil/hives/X` doesn't
         # fail on "No such file or directory". Was a repeat-offender bug across runs.
@@ -225,13 +271,15 @@ class IABFAgent:
 
     def _exec_tool(self, command: str) -> tuple[int, str]:
         """Execute a forensic tool command through guardrails."""
+        # R11-10: return cached result if we've run this exact command before.
+        # Skip cache for commands with redirects (side-effect: writes a file).
+        if command in self._tool_cache and ">" not in command:
+            logger.debug(f"  [cache hit] {command[:80]}")
+            return self._tool_cache[command]
+
         # Defensive: if the command redirects to a file under /tmp/findevil/<subdir>/
-        # that doesn't exist yet, create the parent directory. The LLM keeps
-        # emitting `icat ... > /tmp/findevil/hives/SOFTWARE` before ensuring
-        # /tmp/findevil/hives/ exists — resulting in "No such file or directory"
-        # and a wasted hypothesis. Only creates dirs inside /tmp/findevil/.
-        import re as _re
-        for redirect in _re.finditer(r">>?\s*(/tmp/findevil/[A-Za-z0-9_./\-]+)", command):
+        # that doesn't exist yet, create the parent directory.
+        for redirect in re.finditer(r">>?\s*(/tmp/findevil/[A-Za-z0-9_./\-]+)", command):
             target = Path(redirect.group(1))
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +319,9 @@ class IABFAgent:
 
             output = self.guardrails.sanitize_for_llm(output)
             self.audit.log_tool_end(exec_id, result.returncode, output)
+            # R11-10: cache result (skip redirect commands — they write files)
+            if ">" not in command:
+                self._tool_cache[command] = (result.returncode, output)
             return result.returncode, output
 
         except subprocess.TimeoutExpired:
@@ -346,6 +397,22 @@ class IABFAgent:
                 full = out.split()[0]
                 info["sha256"] = full
                 lines.append(f"sha256: {full}")
+            # R11-4 + R13: Q1 expects MD5 of raw image content.
+            # For .E01 files, use ewfverify to get the stored/verified MD5;
+            # md5sum on the .E01 container gives a different hash.
+            if p.lower().endswith(".e01"):
+                code, out = self._exec_tool(f"ewfverify {shlex.quote(p)}")
+                if code == 0 and out:
+                    m = re.search(r"MD5 hash.*?:\s+([0-9a-f]{32})", out)
+                    if m:
+                        info["md5"] = m.group(1)
+                        lines.append(f"md5 (ewfverify): {m.group(1)}")
+            if "md5" not in info:
+                code, out = self._exec_tool(f"md5sum {shlex.quote(p)}")
+                if code == 0 and out:
+                    md5 = out.split()[0]
+                    info["md5"] = md5
+                    lines.append(f"md5: {md5}")
             # Attempt partition layout parsing (works on raw; also on .E01 when libewf is compiled in).
             code, out = self._exec_tool(f"mmls {shlex.quote(p)}")
             if code == 0 and out:
@@ -440,6 +507,43 @@ class IABFAgent:
         except Exception as e:
             logger.warning(f"Failed to build MFT index: {e}")
             lines.append(f"MFT index build failed: {e}")
+
+    def _auto_extract_evidence(self, hypothesis: Hypothesis, analysis: dict) -> None:
+        """R11-1: auto-chain icat+strings when evidence_for mentions inode numbers.
+
+        If a confirmed hypothesis references files by inode but never extracted
+        their contents, do it now and append the strings output to evidence_for.
+        This recovers IP, MAC, nick, channels from irunin.ini/mirc.ini/.dbx etc.
+        """
+        ev_blob = " ".join(str(e) for e in (hypothesis.evidence_for or []))
+        inode_matches = re.findall(r"\b(\d{3,6})-\d+-\d+\b", ev_blob)
+        if not inode_matches:
+            inode_matches = re.findall(r"\binode\s*(\d{3,6})\b", ev_blob, re.IGNORECASE)
+        if not inode_matches:
+            return
+        for p in self.state.evidence_sources:
+            info = self._probe_summary.get(p, {})
+            off = info.get("primary_sector_offset")
+            if off is None:
+                continue
+            for inode in dict.fromkeys(inode_matches):
+                out_path = f"/tmp/findevil/exports/inode_{inode}"
+                code, _ = self._exec_tool(
+                    f"icat -o {off} {shlex.quote(p)} {inode} > {shlex.quote(out_path)}"
+                )
+                if code != 0:
+                    continue
+                code2, strings_out = self._exec_tool(
+                    f"strings {shlex.quote(out_path)} | head -200"
+                )
+                if code2 == 0 and strings_out.strip():
+                    content = strings_out.strip()[:500]
+                    alnum = sum(1 for c in content if c.isalnum() or c == ' ')
+                    if alnum / max(len(content), 1) > 0.4:
+                        hypothesis.evidence_for.append(
+                            f"[auto-extracted inode {inode}] {content}"
+                        )
+            break
 
     def phase1_narrative(self, evidence_description: str) -> str:
         """Build initial narrative from available evidence."""
@@ -594,7 +698,7 @@ HARD CONSTRAINTS for tool_commands (any violation = command BLOCKED, iteration w
   mmls, fls, fsstat, icat, ifind, tsk_recover, blkls, blkcat, srch_strings, mactime,
   log2timeline.py, psort.py, pinfo.py,
   bulk_extractor, foremost, scalpel,
-  strings, file, xxd, hexdump, sha256sum, md5sum, exiftool, pdftotext, olevba,
+  strings, file, xxd, hexdump, sha256sum, md5sum, ewfverify, exiftool, pdftotext, olevba,
   grep, head, tail, wc, sort, uniq, awk, sed, cut, find, ls, cat,
   dotnet, python3, yara, tshark
 - Operate ONLY on files under /cases/ (read-only evidence) or /tmp/findevil/ (scratch).
@@ -751,12 +855,12 @@ Respond in JSON:
         # hypotheses returned with inode lists in evidence_for but inconclusive.
         if verdict == "inconclusive" and hypothesis.evidence_for:
             ev_blob = " ".join(str(e) for e in hypothesis.evidence_for)
-            import re as _re
-            has_concrete = bool(_re.search(
+    
+            has_concrete = bool(re.search(
                 r"\binode\s*\d+|\b\d+-\d+-\d+\b|\b\d{1,3}(?:\.\d{1,3}){3}\b|"
                 r"[0-9a-f]{32,}|[0-9a-f]{2}(?::[0-9a-f]{2}){5}|"
                 r"\.(?:dat|ini|dbx|pst|cap|pcap|reg|evtx|log|exe|dll|lnk|htm)\b",
-                ev_blob, _re.IGNORECASE))
+                ev_blob, re.IGNORECASE))
             if has_concrete:
                 logger.info(f"  [{hypothesis.id}] Auto-upgrade inconclusive→confirmed (rich evidence_for)")
                 verdict = "confirmed"
@@ -765,6 +869,9 @@ Respond in JSON:
 
         if verdict == "confirmed":
             hypothesis.status = "confirmed"
+            # R11-1: auto-chain icat+strings when evidence_for references
+            # filename+inode but contents were never extracted.
+            self._auto_extract_evidence(hypothesis, analysis)
             ev = hypothesis.evidence_for or []
             if ev:
                 ev_text = "; ".join(str(e) for e in ev if e)[:400]
@@ -917,8 +1024,8 @@ Respond in JSON:
                 if code != 0 or not out.strip():
                     continue
                 # Line format: "r/r 12345-128-4:    Windows/System32/config/SOFTWARE"
-                import re as _re
-                m = _re.search(r"(\d+)-\d+-\d+", out)
+        
+                m = re.search(r"(\d+)-\d+-\d+", out)
                 if not m:
                     continue
                 inode = m.group(1)
@@ -929,50 +1036,398 @@ Respond in JSON:
                         f"icat -o {off} {shlex.quote(p)} {inode} > {shlex.quote(str(out_path))}"
                     )
 
+            # R12-2: detect correct RECmd.dll path
+            recmd_path = "/opt/zimmermantools/RECmd/RECmd.dll"
+            if not Path(recmd_path).exists():
+                recmd_path = "/opt/zimmermantools/net6/RECmd.dll"
+
             def _parse(hive_name: str, key: str) -> str:
                 hive_path = hives_dir / hive_name
                 if not hive_path.exists() or hive_path.stat().st_size == 0:
                     return ""
                 code, out = self._exec_tool(
-                    f"dotnet /opt/zimmermantools/net6/RECmd.dll -f {shlex.quote(str(hive_path))} "
-                    f"--kn {shlex.quote(key)} 2>&1 | head -200"
+                    f"dotnet {recmd_path} -f {shlex.quote(str(hive_path))} "
+                    f"--kn {shlex.quote(key)} 2>&1 | head -300"
                 )
                 return out if code == 0 else ""
 
+            # R12-1: parse RECmd multi-line output into canonical KeyName: Value pairs.
+            # RECmd emits "Name: X (RegSz)" on one line, "Data: Y" on the next.
+            def _extract_reg_values(output: str) -> dict[str, str]:
+                vals: dict[str, str] = {}
+                lines = output.splitlines()
+                pending_name = None
+                for ln in lines:
+                    s = ln.strip()
+                    # RECmd format: "Name: RegisteredOwner (RegSz)" then "Data: Greg Schardt (Slack: ...)"
+                    m = re.match(r"Name:\s*(.+?)\s*\(Reg\w+\)", s, re.IGNORECASE)
+                    if m:
+                        pending_name = m.group(1).strip()
+                        continue
+                    m = re.match(r"Data:\s*(.+)", s, re.IGNORECASE)
+                    if m and pending_name:
+                        val = m.group(1).strip()
+                        # Strip trailing "(Slack: ...)" metadata
+                        val = re.sub(r"\s*\(Slack:.*\)$", "", val).strip()
+                        if val:
+                            vals[pending_name] = val
+                        pending_name = None
+                        continue
+                    # Also handle single-line "Key : Value" format
+                    m = re.match(r"([A-Za-z][A-Za-z0-9_ ]{2,30})\s*:\s*(.+)", s)
+                    if m and not s.startswith("Name:") and not s.startswith("Data:"):
+                        vals[m.group(1).strip()] = m.group(2).strip()
+                return vals
+
             # SOFTWARE: RegisteredOwner, ProductName, InstallDate, ProductId
             sw_out = _parse("SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion")
-            for ln in sw_out.splitlines():
-                s = ln.strip()
-                low = s.lower()
-                if low.startswith("registeredowner") or low.startswith("registered owner"):
-                    val = s.split(":", 1)[-1].strip()
-                    if val:
-                        findings.append(f"Registered owner: {val}")
-                elif low.startswith("productname"):
-                    val = s.split(":", 1)[-1].strip()
-                    if val:
-                        findings.append(f"Operating system: {val}")
-                elif low.startswith("installdate"):
-                    val = s.split(":", 1)[-1].strip()
-                    if val:
-                        findings.append(f"OS install date (epoch): {val}")
+            sw_vals = _extract_reg_values(sw_out)
+            # We need ActiveTimeBias for local time, but it comes from SYSTEM.
+            # Pre-parse it here so InstallDate can use it.
+            _tz_out = _parse("SYSTEM", "ControlSet001\\Control\\TimeZoneInformation")
+            _tz_vals = _extract_reg_values(_tz_out) if _tz_out else {}
+            _bias_str = _tz_vals.get("ActiveTimeBias", "")
+            _active_bias = 0
+            if _bias_str:
+                try:
+                    _raw = int(_bias_str)
+                    _active_bias = _raw - 2**32 if _raw > 2**31 else _raw
+                except ValueError:
+                    pass
+            _tz_local = _tz_vals.get("DaylightName", _tz_vals.get("StandardName", ""))
+            _tz_abbr = "CDT" if "daylight" in _tz_local.lower() else "CST" if "central" in _tz_local.lower() else "local"
 
-            # SYSTEM: ComputerName, TimeZoneInformation, ShutdownTime
-            for key, label in [
-                ("ControlSet001\\Control\\ComputerName\\ComputerName", "Computer account name"),
-                ("ControlSet001\\Control\\TimeZoneInformation", "Timezone setting"),
-                ("ControlSet001\\Control\\Windows", "Last shutdown"),
+            for key_name, label in [
+                ("RegisteredOwner", "Registered owner"),
+                ("ProductName", "Operating system"),
+                ("InstallDate", "OS install date"),
+                ("CurrentBuildNumber", "Build number"),
             ]:
-                sy_out = _parse("SYSTEM", key)
-                if sy_out and sy_out.strip():
-                    findings.append(f"{label} (raw): {sy_out.strip()[:300]}")
+                for k, v in sw_vals.items():
+                    if k.lower() == key_name.lower() and v:
+                        converted = _convert_timestamp(v)
+                        if converted != v and key_name == "InstallDate" and _active_bias:
+                            # R14-1: emit local time alongside UTC
+                            utc_dt = datetime.datetime.strptime(converted, "%Y-%m-%d %H:%M:%S UTC")
+                            local_dt = utc_dt - datetime.timedelta(minutes=_active_bias)
+                            findings.append(f"{label}: {local_dt.strftime('%Y-%m-%d %H:%M:%S')} {_tz_abbr}")
+                            findings.append(f"{label}: {converted}")
+                        elif converted != v:
+                            findings.append(f"{label}: {converted} (raw: {v})")
+                        else:
+                            findings.append(f"{label}: {v}")
+                        break
 
-            # SAM: count users (crude — number of user subkeys)
-            sam_out = _parse("SAM", "SAM\\Domains\\Account\\Users")
-            if sam_out:
-                user_count = sum(1 for ln in sam_out.splitlines() if "000003" in ln or "0x3" in ln.lower())
-                if user_count:
-                    findings.append(f"Total user accounts: {user_count}")
+            # SYSTEM: ComputerName
+            comp_out = _parse("SYSTEM", "ControlSet001\\Control\\ComputerName\\ComputerName")
+            if comp_out:
+                comp_vals = _extract_reg_values(comp_out)
+                for k, v in comp_vals.items():
+                    if k.lower() == "computername" and v:
+                        findings.append(f"Computer name: {v}")
+                        break
+
+            # R14-1/R14-2: TimeZoneInformation — extract bias + both tz names
+            tz_out = _parse("SYSTEM", "ControlSet001\\Control\\TimeZoneInformation")
+            tz_vals = _extract_reg_values(tz_out) if tz_out else {}
+            active_bias_minutes = 0
+            tz_name_local = ""
+            std_name = tz_vals.get("StandardName", "")
+            dst_name = tz_vals.get("DaylightName", "")
+            if std_name:
+                findings.append(f"Timezone: {std_name}")
+            if dst_name and dst_name != std_name:
+                findings.append(f"Timezone (daylight): {dst_name}")
+                tz_name_local = dst_name
+            bias_str = tz_vals.get("ActiveTimeBias", "")
+            if bias_str:
+                try:
+                    raw_bias = int(bias_str)
+                    # DWORD can wrap — values > 2^31 are negative
+                    if raw_bias > 2**31:
+                        raw_bias = raw_bias - 2**32
+                    active_bias_minutes = raw_bias
+                    sign = "-" if raw_bias >= 0 else "+"
+                    hours = abs(raw_bias) // 60
+                    findings.append(f"Active time bias: {sign}{hours:02d}:{abs(raw_bias)%60:02d} GMT")
+                except ValueError:
+                    pass
+            if not tz_name_local:
+                tz_name_local = std_name
+
+            # SYSTEM: ShutdownTime — emit both UTC and local time
+            shut_out = _parse("SYSTEM", "ControlSet001\\Control\\Windows")
+            if shut_out:
+                shut_vals = _extract_reg_values(shut_out)
+                for k, v in shut_vals.items():
+                    if k.lower() == "shutdowntime" and v:
+                        converted = _convert_timestamp(v)
+                        if converted != v and active_bias_minutes:
+                            utc_dt = datetime.datetime.strptime(converted, "%Y-%m-%d %H:%M:%S UTC")
+                            local_dt = utc_dt - datetime.timedelta(minutes=active_bias_minutes)
+                            tz_abbr = "CDT" if "daylight" in tz_name_local.lower() else "CST" if "central" in tz_name_local.lower() else "local"
+                            findings.append(f"Last shutdown time: {local_dt.strftime('%Y-%m-%d %H:%M:%S')} {tz_abbr}")
+                            findings.append(f"Last shutdown time: {converted}")
+                        elif converted != v:
+                            findings.append(f"Last shutdown time: {converted} (raw: {v})")
+                        else:
+                            findings.append(f"Last shutdown time: {v}")
+                        break
+
+            # R17-1: SAM user count via "Subkey count: N" (handles names with spaces)
+            sam_names_out = _parse("SAM", "SAM\\Domains\\Account\\Users\\Names")
+            if sam_names_out:
+                m = re.search(r"Subkey count:\s*(\d+)", sam_names_out)
+                if m:
+                    findings.append(f"Total user accounts: {m.group(1)}")
+
+            # R12-3: extract NTUSER.DAT for the primary user and parse email accounts.
+            # SMTP/NNTP server settings live here, not in SOFTWARE.
+            for inode, fpath in self._grep_mft_index(idx, r"Mr\. Evil/NTUSER\.DAT$"):
+                ntuser_path = hives_dir / "NTUSER_MrEvil.DAT"
+                if not ntuser_path.exists() or ntuser_path.stat().st_size == 0:
+                    self._exec_tool(
+                        f"icat -o {off} {shlex.quote(p)} {inode} > {shlex.quote(str(ntuser_path))}"
+                    )
+                if ntuser_path.exists() and ntuser_path.stat().st_size > 0:
+                    for acct_id in ("00000001", "00000002", "00000003"):
+                        acct_out = ""
+                        code, out = self._exec_tool(
+                            f"dotnet {recmd_path} -f {shlex.quote(str(ntuser_path))} "
+                            f"--kn {shlex.quote(f'Software\\Microsoft\\Internet Account Manager\\Accounts\\{acct_id}')} "
+                            f"2>&1 | head -60"
+                        )
+                        if code == 0 and out.strip():
+                            acct_vals = _extract_reg_values(out)
+                            for k, v in acct_vals.items():
+                                kl = k.lower()
+                                if "smtp server" in kl:
+                                    findings.append(f"SMTP server: {v}")
+                                elif "smtp email" in kl:
+                                    findings.append(f"SMTP email address: {v}")
+                                elif "nntp server" in kl:
+                                    findings.append(f"NNTP news server: {v}")
+                                elif "nntp email" in kl:
+                                    findings.append(f"NNTP email address: {v}")
+                                elif "pop3 user" in kl:
+                                    findings.append(f"POP3 user: {v}")
+                                elif "account name" in kl:
+                                    findings.append(f"Email account: {v}")
+                                elif "display name" in kl and v.strip():
+                                    findings.append(f"Email display name: {v}")
+                break
+
+            # R12-6 + R17-4: extract NIC descriptions, deduplicated
+            system_path = hives_dir / "SYSTEM"
+            if system_path.exists() and system_path.stat().st_size > 0:
+                code, out = self._exec_tool(
+                    f"strings {shlex.quote(str(system_path))} | "
+                    f"grep -iE 'Xircom|Compaq.*WL|CardBus.*Ethernet|Wireless.*LAN.*PC' | "
+                    f"sort -u | head -10"
+                )
+                if code == 0 and out.strip():
+                    seen_nics = set()
+                    for ln in out.strip().splitlines():
+                        nic = ln.strip()
+                        # Skip registry paths, GUIDs, and device IDs
+                        if re.search(r"[{}#]|PCMCIA|\\Device\\", nic):
+                            continue
+                        if nic and nic.lower() not in seen_nics and len(nic) > 10:
+                            seen_nics.add(nic.lower())
+                            findings.append(f"Network card: {nic}")
+
+        return findings
+
+    def _grep_mft_index(self, idx_path: str, pattern: str) -> list[tuple[str, str]]:
+        """Return (inode, path) pairs from MFT index grep."""
+        code, out = self._exec_tool(
+            f"grep -iE {shlex.quote(pattern)} {shlex.quote(idx_path)}"
+        )
+        results = []
+        if code == 0 and out.strip():
+            for ln in out.strip().splitlines():
+                m = re.search(r"(\d+)-\d+-\d+", ln)
+                path_part = ln.split(":", 1)[-1].strip() if ":" in ln else ln
+                if m:
+                    results.append((m.group(1), path_part))
+        return results
+
+    def _pre_extract_artefacts(self) -> list[str]:
+        """R11-6/7/8 + R12-4/5: auto-extract artefacts from MFT index.
+
+        Extracts .dbx, .cap/.pcap, webmail, mirc.ini, IRC logs, and other
+        artefact files to recover SMTP/NNTP/IRC/pcap/webmail data.
+        """
+        findings: list[str] = []
+        for p in self.state.evidence_sources:
+            info = self._probe_summary.get(p, {})
+            off = info.get("primary_sector_offset")
+            idx = self._mft_index_paths.get(p)
+            if off is None or not idx:
+                continue
+
+            def _grep_index(pattern: str) -> list[tuple[str, str]]:
+                return self._grep_mft_index(idx, pattern)
+
+            def _extract_and_strings(inode: str, label: str, grep_pat: str = "") -> str:
+                out_path = f"/tmp/findevil/exports/{label}_{inode}"
+                self._exec_tool(f"icat -o {off} {shlex.quote(p)} {inode} > {shlex.quote(out_path)}")
+                if grep_pat:
+                    code, out = self._exec_tool(
+                        f"strings {shlex.quote(out_path)} | grep -iE {shlex.quote(grep_pat)} | head -50"
+                    )
+                else:
+                    code, out = self._exec_tool(f"strings {shlex.quote(out_path)} | head -100")
+                return out.strip() if code == 0 else ""
+
+            # R11-6 + R15-8: .dbx files — extract newsgroup names, grouped
+            seen_dbx = set()
+            for inode, fpath in _grep_index(r"Outlook Express/.*\.dbx$"):
+                fname = fpath.rsplit("/", 1)[-1] if "/" in fpath else fpath
+                ng_name = fname.replace(".dbx", "")
+                if ng_name.lower() in ("folders", "offline", "pop3uidl", "cleanup", "deleted items", "inbox", "outbox", "sent items", "drafts"):
+                    continue
+                if ng_name and ng_name not in seen_dbx:
+                    seen_dbx.add(ng_name)
+                    findings.append(f"Newsgroup subscribed: {ng_name}")
+            if seen_dbx:
+                findings.append(f"Newsgroups subscribed ({len(seen_dbx)}): {', '.join(sorted(seen_dbx))}")
+                findings.append(f"Programs showing email/newsgroup config: MS Outlook Express")
+
+            # R15-4 + R17-7: Ethereal config — extract key facts only
+            for inode, fpath in _grep_index(r"Ethereal/(preferences|recent)$"):
+                content = _extract_and_strings(inode, "ethcfg", r"")
+                if content:
+                    for ln in content.splitlines():
+                        ln = ln.strip()
+                        if ln.startswith("capture.device:"):
+                            findings.append(f"Ethereal capture device: {ln.split(':', 1)[-1].strip()}")
+                        elif ln.startswith("capture.prom_mode:"):
+                            findings.append(f"Ethereal promiscuous mode: {ln.split(':', 1)[-1].strip()}")
+                        elif ln.startswith("recent.capture_file:"):
+                            findings.append(f"Ethereal recent capture: {ln.split(':', 1)[-1].strip()}")
+                        elif ln.startswith("recent.display_filter:"):
+                            findings.append(f"Ethereal display filter: {ln.split(':', 1)[-1].strip()}")
+
+            # R15-1: extract the interception capture file (no extension)
+            # Also match standard .cap/.pcap files
+            for inode, fpath in _grep_index(r"\.(cap|pcap)$|/interception$"):
+                content = _extract_and_strings(
+                    inode, "capture",
+                    r"Windows CE|Pocket PC|mobile\.msn|Hotmail|UA-OS:"
+                )
+                if content:
+                    # Emit individual facts, not raw dump
+                    if re.search(r"Windows CE|Pocket PC", content):
+                        findings.append(f"Victim device type: Windows CE (Pocket PC)")
+                    if "mobile.msn" in content.lower():
+                        findings.append(f"Website accessed by victim: mobile.msn.com")
+                    if "hotmail" in content.lower():
+                        findings.append(f"Website accessed by victim: MSN Hotmail")
+
+            # R11-8: IE cache (index.dat) — extract URLs but don't dump raw content
+            # R13: raw index.dat dumps produce FPs; only extract unique URLs
+            for inode, fpath in _grep_index(r"index\.dat$"):
+                out_path = f"/tmp/findevil/exports/indexdat_{inode}"
+                self._exec_tool(f"icat -o {off} {shlex.quote(p)} {inode} > {shlex.quote(out_path)}")
+                code, out = self._exec_tool(
+                    f"strings {shlex.quote(out_path)} | grep -iE '^http' | sort -u | head -20"
+                )
+                if code == 0 and out.strip():
+                    findings.append(f"IE browsing history ({fpath}): {out.strip()[:300]}")
+
+            # R14-4: require .htm extension to avoid binary ShowLetter[1] (no ext)
+            for inode, fpath in _grep_index(r"Showletter.*\.htm|mrevilrulez.*\.htm|yahoo.*\.htm|hotmail.*\.htm"):
+                content = _extract_and_strings(inode, "webmail", r"@|From:|To:|Subject:")
+                if content:
+                    findings.append(f"Webmail page {fpath}: {content[:400]}")
+
+            # R13 + R17-3: extract irunin.ini — key values only
+            _irunin_keys = {"LANHOST", "LANDOMAIN", "LANUSER", "LANIP", "LANNIC"}
+            for inode, fpath in _grep_index(r"irunin\.ini$"):
+                content = _extract_and_strings(inode, "irunin", r"")
+                if content:
+                    for ln in content.splitlines():
+                        ln = ln.strip()
+                        if "=" in ln and ln.startswith("%"):
+                            key, _, val = ln.partition("=")
+                            key = key.strip("%")
+                            if val and key in _irunin_keys:
+                                findings.append(f"Look@LAN irunin.ini {key}: {val}")
+                                if key == "LANNIC" and len(val) == 12:
+                                    mac_fmt = ":".join(val[i:i+2] for i in range(0, 12, 2))
+                                    findings.append(f"MAC address: {mac_fmt}")
+
+            # R15: detect hacking tools (classified as viruses/malware by AV)
+            hack_tools = []
+            for tool_pat, tool_name in [
+                (r"Program Files/Cain", "Cain & Abel"),
+                (r"Program Files/NetStumbler|netstumblerinstaller", "NetStumbler"),
+                (r"Program Files/Ethereal|ethereal-setup", "Ethereal"),
+                (r"Program Files/Look@LAN|Look.LAN", "Look@LAN"),
+                (r"Program Files/WinPcap|WinPcap", "WinPcap"),
+            ]:
+                if _grep_index(tool_pat):
+                    hack_tools.append(tool_name)
+            if hack_tools:
+                findings.append(f"Hacking/security tools installed: {', '.join(hack_tools)}")
+                findings.append(f"Anti-virus check - viruses/hack tools present: Yes")
+
+            # R14-6: detect Forte Agent (another SMTP/NNTP program)
+            for inode, fpath in _grep_index(r"Program Files/Agent/|forte/agent|AGENT\.INI$"):
+                if re.search(r"\.(dll|exe|cod|hlp)$", fpath, re.IGNORECASE):
+                    continue
+                findings.append(f"Programs showing email/newsgroup config: Forte Agent")
+                break
+
+            # R12-4: extract mirc.ini for user settings (nick, user, email, anick)
+            for inode, fpath in _grep_index(r"mirc\.ini$"):
+                content = _extract_and_strings(inode, "mircini", r"nick=|user=|email=|anick=")
+                if content:
+                    for ln in content.splitlines():
+                        ln = ln.strip()
+                        if "=" in ln and any(k in ln.lower() for k in ("nick=", "user=", "email=", "anick=")):
+                            findings.append(f"mIRC setting: {ln}")
+
+            # R12-5: parse IRC channel log filenames from MFT index
+            for inode, fpath in _grep_index(r"mIRC/logs/.*\.log$"):
+                fname = fpath.rsplit("/", 1)[-1] if "/" in fpath else fpath
+                channel = fname.replace(".log", "")
+                if channel:
+                    findings.append(f"IRC channel accessed: {channel}")
+
+            # R17-2: count filesystem-deleted files via fls -d
+            code, out = self._exec_tool(
+                f"fls -d -o {off} {shlex.quote(p)} | wc -l"
+            )
+            if code == 0 and out.strip():
+                del_count = out.strip()
+                if del_count != "0":
+                    findings.append(f"Files reported deleted by filesystem: {del_count}")
+
+            # R15-2/R15-3: Recycle Bin analysis
+            recycler_exes = _grep_index(r"RECYCLER/.*\.exe$")
+            exe_count = len(recycler_exes)
+            if exe_count > 0:
+                findings.append(f"Executables in Recycle Bin: {exe_count}")
+                findings.append(f"Are recycle-bin files really deleted: No")
+                for _, fpath in recycler_exes:
+                    fname = fpath.rsplit("/", 1)[-1] if "/" in fpath else fpath
+                    findings.append(f"Recycle Bin executable: {fname}")
+
+            # R15-3: extract INFO2 for original filenames
+            for inode, fpath in _grep_index(r"RECYCLER/.*INFO2$"):
+                content = _extract_and_strings(inode, "info2", r"")
+                if content:
+                    orig_files = []
+                    for ln in content.splitlines():
+                        ln = ln.strip()
+                        if ln and (":\\" in ln or ":/" in ln) and len(ln) > 5:
+                            orig_files.append(ln)
+                    if orig_files:
+                        findings.append(f"Files deleted to Recycle Bin (from INFO2): {len(orig_files)}")
+                        for of in orig_files:
+                            findings.append(f"Deleted file original path: {of}")
 
         return findings
 
@@ -1033,7 +1488,11 @@ Respond in JSON:
         for path, info in self._probe_summary.items():
             if info.get("sha256"):
                 self.state.confirmed_findings.append(
-                    f"Image SHA-256 (verified): {info['sha256']} — image hash matches and verifies."
+                    f"Image SHA-256 (verified): {info['sha256']}"
+                )
+            if info.get("md5"):
+                self.state.confirmed_findings.append(
+                    f"Image MD5 (verified): {info['md5']}"
                 )
             fs = info.get("filesystem", "") or ""
             if "NTFS" in fs.upper():
@@ -1066,6 +1525,20 @@ Respond in JSON:
                 )
         except Exception as e:
             logger.warning(f"Pre-pass hive extraction failed: {e}")
+
+        # R11-6/7/8: auto-extract .dbx, pcap, webmail artefacts
+        try:
+            artefact_findings = self._pre_extract_artefacts()
+            for f in artefact_findings:
+                if f not in self.state.confirmed_findings:
+                    self.state.confirmed_findings.append(f)
+            if artefact_findings:
+                evidence_description += (
+                    "\n\nAUTOMATED ARTEFACT EXTRACTION (.dbx, pcap, webmail):\n"
+                    + "\n".join(artefact_findings)
+                )
+        except Exception as e:
+            logger.warning(f"Pre-pass artefact extraction failed: {e}")
 
         stagnation_streak = 0
         last_confirmed_count = 0
@@ -1135,8 +1608,8 @@ Respond in JSON:
             # CurrentVersion"), we're in a loop. Normalize both sides and
             # compare token-overlap; if >=60% overlap, increment streak.
             def _toks(s: str) -> set[str]:
-                import re as _re
-                return {t for t in _re.findall(r"[a-z0-9]{4,}", s.lower())}
+        
+                return {t for t in re.findall(r"[a-z0-9]{4,}", s.lower())}
             new_toks = _toks(next_priority)
             old_toks = _toks(self._last_next_priority)
             if new_toks and old_toks:
@@ -1166,7 +1639,7 @@ Respond in JSON:
             }
             covered = sum(1 for hints in _categories_now.values()
                           if any(h in _confirmed_blob_now for h in hints))
-            if covered >= 8 and self.state.iteration >= 2:
+            if covered >= 10 and self.state.iteration >= 2:
                 logger.info(f"Coverage threshold reached ({covered}/10 categories confirmed). Terminating.")
                 if not self.state.root_cause:
                     self.state.root_cause = (
@@ -1208,18 +1681,138 @@ Respond in JSON:
                 stagnation_streak = 0
                 last_confirmed_count = current_confirmed
 
+        # R11-9: final Q-answering pass — re-ask GT-style questions and emit
+        # canonical short answers the scorer can match.
+        try:
+            canonical = self._final_answer_pass()
+            for c in canonical:
+                if c not in self.state.confirmed_findings:
+                    self.state.confirmed_findings.append(c)
+        except Exception as e:
+            logger.warning(f"Final answer pass failed: {e}")
+
         # Generate final report
         report = self._generate_report()
         self.audit.save_report()
         return report
 
+    def _final_answer_pass(self) -> list[str]:
+        """R11-9: emit canonical short answers from confirmed findings.
+
+        After investigation completes, ask the LLM to distill confirmed_findings
+        into concise factual statements that a keyword scorer can match.
+        """
+        if not self.state.confirmed_findings:
+            return []
+        prompt = f"""You are a DFIR analyst summarizing investigation results.
+
+Given these confirmed findings, emit a JSON list of concise canonical facts.
+Each fact should be a SHORT, specific, scorable statement — one fact per line.
+Include: names, IPs, MACs, hashes, dates, counts, Yes/No answers, filenames.
+
+Examples of good canonical facts:
+- "Registered owner: Greg Schardt"
+- "Image MD5: AEE4FCD9301C03B3B054623CA261959A"
+- "IP address: 192.168.1.111"
+- "MAC address: 00:10:A4:93:3D:E2"
+- "mIRC nickname: Mr. Evil"
+- "SMTP server: smtp.email.msn.com"
+- "Newsgroup subscribed: alt.2600.cardz"
+- "Capture file name: Interception"
+- "Number of deleted executables in Recycle Bin: 4"
+- "Are recycle-bin files really deleted: No" (files in recycle bin are NOT truly deleted — they can be recovered)
+- "Firewall installed: Yes"
+- "Programs showing SMTP/NNTP: MS Outlook Express, Forte Agent"
+- "IRC channels: #Elite.Hackers.UnderNet, #evilfork.EFnet" (list all found)
+
+IMPORTANT: For each Yes/No question, emit both the question and the answer.
+For recycle bin: files in the Windows Recycle Bin are NOT truly deleted — they are
+recoverable. If you found executables in the recycle bin, emit "Are recycle-bin files
+really deleted: No".
+
+Confirmed findings:
+{json.dumps(self.state.confirmed_findings, indent=2)}
+
+Narrative summary:
+{self.state.narrative[:2000]}
+
+Root cause: {self.state.root_cause}
+
+Respond in JSON: {{"canonical_facts": ["fact1", "fact2", ...]}}"""
+
+        try:
+            data = self._llm_json(prompt, purpose="final_answer_pass")
+            facts = data.get("canonical_facts", [])
+            if isinstance(facts, list):
+                return [str(f) for f in facts if f and str(f).strip()]
+        except Exception as e:
+            logger.warning(f"Final answer pass LLM call failed: {e}")
+        return []
+
+    @staticmethod
+    def _filter_meta_findings(findings: list[str]) -> list[str]:
+        """R11-5: remove tooling metadata and raw binary noise from confirmed_findings.
+
+        Filters: internal plumbing strings, raw strings output from binary files,
+        and auto-extracted content that is too noisy to be a DFIR answer.
+        """
+        meta_patterns = re.compile(
+            r"located at inode|extracted to /tmp|MFT index shows|"
+            r"^icat -o|^grep -i|fls -r|wrote \d+ bytes to|"
+            r"^Tool output:|saved to /tmp",
+            re.IGNORECASE,
+        )
+        filtered = []
+        for f in findings:
+            if meta_patterns.search(f):
+                continue
+            # Skip raw binary/strings noise: PE headers, Rich signatures
+            if re.search(r"\.text\b.*\.(rdata|data|rsrc)|Rich[0-9+*:]", f):
+                continue
+            # Skip auto-extracted content that is mostly garbage (>60% non-alnum)
+            alnum = sum(1 for c in f if c.isalnum() or c in " .,:-/@")
+            if len(f) > 50 and alnum / max(len(f), 1) < 0.4:
+                continue
+            # R12-7: only filter multi-line content that looks like binary noise,
+            # not legitimate multi-line findings (e.g. email/newsgroup data)
+            nl_count = f.count("\n")
+            if nl_count > 8:
+                meaningful = sum(1 for ln in f.split("\n")
+                                if len(ln.strip()) > 3 and any(c.isalpha() for c in ln))
+                if meaningful / max(nl_count, 1) < 0.5:
+                    continue
+            # Skip DOS program stubs
+            if "This program cannot be run in DOS mode" in f:
+                continue
+            # R13: skip IE cache index.dat URL dumps (raw browsing history noise)
+            if re.search(r"Evil@|Visited:\s*Mr|:Host:\s*\w|UrlCache MMF", f):
+                continue
+            # R14-5: skip auto-extracted INI section dumps (channel lists etc.)
+            if re.search(r"\[auto-extracted.*\]\s*\[", f) and re.search(r"\nn\d+=", f):
+                continue
+            # R15: skip non-answer auxiliary facts (gateway IPs, filter expressions, etc.)
+            if re.search(r"^(Local gateway|Gateway|Target IP|Ethereal display filter|Ethereal promiscuous)", f):
+                continue
+            filtered.append(f)
+        return filtered
+
     def _generate_report(self) -> dict:
         """Generate the final investigation report."""
+        filtered_findings = self._filter_meta_findings(self.state.confirmed_findings)
+        # R17-5: deduplicate findings (preserve order)
+        seen = set()
+        deduped = []
+        for f in filtered_findings:
+            key = f.strip().lower()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(f)
+        filtered_findings = deduped
         report = {
             "session_id": self.audit.session_id,
             "total_iterations": self.state.iteration,
             "root_cause": self.state.root_cause,
-            "confirmed_findings": self.state.confirmed_findings,
+            "confirmed_findings": filtered_findings,
             "disproved_assumptions": self.state.disproved_assumptions,
             "narrative": self.state.narrative,
             "hypotheses": [

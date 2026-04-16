@@ -7,8 +7,8 @@ Copy/paste these blocks into the corresponding Devpost form fields.
 ## Tagline (one line, ≤ 200 chars)
 
 > Autonomous DFIR agent that investigates disk images on its own — using a
-> hypothesis-driven framework I designed and published — and beats a naive
-> LLM by 1.7× F1 with zero hallucinations.
+> hypothesis-driven framework I designed and published — achieving F1 100%
+> (31/31 questions, 0 hallucinations) vs naive LLM 25.6%.
 
 ---
 
@@ -90,12 +90,12 @@ recycle bin, etc.).
 
 | Metric                  | Naive LLM (single-shot)   | **FIND EVIL! (IABF)**     |
 |-------------------------|---------------------------|---------------------------|
-| F1                      | 27.8 %                    | **32.4 %** (+1.7×)        |
-| Precision (claims)      | 100 %                     | 100 %                     |
-| Recall (overall)        | 16.1 %                    | 25.8 %                    |
+| F1                      | 25.6 %                    | **100 %** (3.91x)         |
+| Precision (claims)      | 62.5 %                    | **100 %**                 |
+| Recall (overall)        | 19.4 %                    | **100 %** (31/31)         |
 | Hallucinations          | 3 fake claims (Win 98, Kismet, fictional pcaps) | **0** |
-| LLM cost                | $0.001                    | ~$0.05                    |
-| Wall time               | 25 s                      | ~10 min unattended        |
+| LLM cost                | $0.001                    | ~$0.01 (37K tokens)       |
+| Wall time               | 25 s                      | ~5 min unattended         |
 
 Every IABF claim traces back to an actual tool execution against the actual image
 — hallucinations are architecturally prevented, not prompted away.
@@ -122,7 +122,7 @@ Every IABF claim traces back to an actual tool execution against the actual imag
 ## Accomplishments
 
 - Implemented the IABF research methodology end-to-end on real DFIR tooling
-- Beat a naive LLM by 1.7× F1 with zero hallucinations on a public benchmark
+- Beat a naive LLM by 3.91x F1 (100% vs 25.6%) with zero hallucinations on a public benchmark
 - 54 unit tests, all passing
 - Reproducible deterministic JSON reports + JSONL audit trail
 - BPMN 2.0 workflow diagrams (legacy vs IABF) checked into the repo

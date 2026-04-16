@@ -28,6 +28,10 @@ datasets/**/*.img
 datasets/**/*.mem
 datasets/**/*.pcap
 
+# Reports (generated per-run, keep ground truth only)
+reports/*.json
+!reports/ground_truth/*.json
+
 # Console logs
 logs/*.log
 

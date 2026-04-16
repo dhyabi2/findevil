@@ -68,7 +68,7 @@ class ForensicGuardrails:
         # Network
         "tshark", "tcpdump", "capinfos", "editcap",
         # Utilities
-        "strings", "file", "xxd", "hexdump", "sha256sum", "sha1sum",
+        "strings", "file", "xxd", "hexdump", "sha256sum", "sha1sum", "ewfverify",
         "md5sum", "stat", "ls", "find", "grep", "cat", "head", "tail",
         "wc", "sort", "uniq", "awk", "sed", "cut", "tr", "base64",
         "python3", "exiftool", "pdftotext", "olevba",
@@ -168,7 +168,8 @@ class ForensicGuardrails:
             if path.is_absolute():
                 if not any(self._is_subpath(path, allowed) for allowed in self.allowed_paths):
                     # Allow access to tool binaries themselves
-                    if path.parent in (Path("/usr/bin"), Path("/opt/zimmermantools")):
+                    if path.parent in (Path("/usr/bin"), Path("/opt/zimmermantools")) or \
+                       str(path).startswith("/opt/zimmermantools/"):
                         continue
                     return GuardrailViolation(
                         rule="path_boundary",
